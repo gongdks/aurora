@@ -1,0 +1,110 @@
+[project]
+name = "ai-agent"
+version = "4.0.0"
+description = "Practical Plan-and-Execute AI Agent — AutoGen multi-agent, tool-calling, PyQt6 Desktop UI & FastAPI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "AI Agent Team" },
+]
+keywords = ["ai-agent", "langchain", "react", "tool-calling", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-classic>=0.0.6",
+    "langchain-community>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-ollama>=0.3.0",
+    "duckduckgo-search>=6.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+
+    "python-dotenv>=1.0.0",
+    "pydantic-settings>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "ag2>=0.8.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+ai-agent = "app_qt:main"
+
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+# ============================================================================
+# Ruff —— Code style & auto-fix
+# ============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["__pycache__", ".git", ".claude", "agent_notes", "agent_workspace"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "SIM",
+    "RUF",
+]
+ignore = [
+    "E501",
+    "B008",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+# ============================================================================
+# Mypy —— Static type checking
+# ============================================================================
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["__pycache__", ".claude"]
+
+# ============================================================================
+# Pytest —— Test config
+# ============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short", "--strict-markers"]

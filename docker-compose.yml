@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  agent:
+    build: .
+    container_name: ai-agent
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./agent_notes:/app/agent_notes
+      - ./agent_workspace:/app/agent_workspace
+      - agent_data:/app/data
+    restart: unless-stopped
+
+  # Optional: local Ollama for fully-offline operation
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-agent-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - ollama
+
+volumes:
+  agent_data:
+  ollama_data:

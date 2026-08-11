@@ -1,0 +1,1 @@
+"""Memory layer — short-term sliding window + SQLite long-term persistence."""

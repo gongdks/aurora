@@ -1,0 +1,21 @@
+# AI Agent — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+langchain>=0.3.0
+langchain-classic>=0.0.6
+langchain-community>=0.3.0
+langchain-openai>=0.3.0
+langchain-ollama>=0.3.0
+
+# Search
+duckduckgo-search>=6.0.0
+
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+
+# Config
+python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
