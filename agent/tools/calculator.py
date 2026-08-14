@@ -24,7 +24,6 @@ _SAFE_OPS = {
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
     ast.USub: operator.neg,
-    ast.UAdd: operator.pos,
 }
 
 _CONSTANTS = {

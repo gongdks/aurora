@@ -136,9 +136,9 @@ class ProgressTracker:
         """Keep only the most recent events when over capacity."""
         limit = max(_MAX_EVENTS, self._expected * 4)
         if len(self._events) > limit:
-            self._events = self._events[-_MAX_EVENTS:]
+            self._events = self._events[-limit:]
         if len(self._tool_events) > limit:
-            self._tool_events = self._tool_events[-_MAX_EVENTS:]
+            self._tool_events = self._tool_events[-limit:]
 
     @property
     def tool_calls(self) -> list[dict[str, Any]]:

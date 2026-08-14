@@ -14,16 +14,22 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from autogen import (
-    AssistantAgent,
-    GroupChat,
-    GroupChatManager,
-    UserProxyAgent,
-)
+try:
+    from autogen import (
+        AssistantAgent,
+        GroupChat,
+        GroupChatManager,
+        UserProxyAgent,
+    )
+    _HAS_AUTOGEN = True
+except ImportError:
+    _HAS_AUTOGEN = False
+    AssistantAgent = GroupChat = GroupChatManager = UserProxyAgent = None  # type: ignore
 
 from agent.config import settings
 from agent.progress import make_log, make_tool
 from agent.tools.registry import list_tools
+from agent.utils.message_extractor import extract_answer, extract_plan
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +112,10 @@ class AutoGenOrchestrator:
     """
 
     def __init__(self) -> None:
+        if not _HAS_AUTOGEN:
+            raise ImportError(
+                "AutoGen 未安装。请运行: pip install pyautogen"
+            )
         self._llm_config = _build_llm_config()
         self._cancel_event: threading.Event | None = None
         self._progress_cb: Callable[[dict[str, Any]], None] | None = None
@@ -120,19 +130,61 @@ class AutoGenOrchestrator:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
-        """Run Plan-and-Execute via AutoGen GroupChat."""
+        """Run Plan-and-Execute via AutoGen GroupChat.
+
+        Returns just the answer string (backward compatible).
+        """
+        result = self._run_groupchat(
+            user_input, chat_history_text, progress_callback, cancel_event,
+        )
+        return result["answer"]
+
+    def run_complex(
+        self,
+        user_input: str,
+        chat_history_text: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        plan_rounds: int = 0,
+        previous_plan: str = "",
+        previous_result: str = "",
+    ) -> dict[str, str | int]:
+        """Run GroupChat with re-plan support for LangGraph integration.
+
+        Returns dict with keys: answer, plan, plan_rounds.
+        """
+        result = self._run_groupchat(
+            user_input, chat_history_text, progress_callback, cancel_event,
+            plan_rounds=plan_rounds,
+            previous_plan=previous_plan,
+            previous_result=previous_result,
+        )
+        return result
+
+    def _run_groupchat(
+        self,
+        user_input: str,
+        chat_history_text: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
+        plan_rounds: int = 0,
+        previous_plan: str = "",
+        previous_result: str = "",
+    ) -> dict[str, str | int]:
+        """Internal: run GroupChat and return answer + plan + metadata."""
         logger.info("[AutoGenOrch] Starting GroupChat for: %s", user_input[:60])
 
         self._cancel_event = cancel_event
         self._progress_cb = progress_callback
 
         if cancel_event and cancel_event.is_set():
-            return "⏹ 已停止"
+            return {"answer": "⏹ 已停止", "plan": "", "plan_rounds": plan_rounds}
 
-        if progress_callback:
-            progress_callback(make_log("📋 **Analyzing goal and creating execution plan...**"))
+        if progress_callback and plan_rounds == 0:
+            progress_callback(make_log("📋 **Starting Plan-and-Execute via AutoGen GroupChat...**"))
+        elif progress_callback and plan_rounds > 0:
+            progress_callback(make_log(f"🔄 **Re-plan round {plan_rounds + 1}...**"))
 
-        # Create agents fresh each run
         user_proxy, planner, executor, verifier = _create_agents(self._llm_config)
 
         group_chat = GroupChat(
@@ -151,8 +203,17 @@ class AutoGenOrchestrator:
 
         initial_msg = (
             f"## 用户目标\n{user_input}\n\n"
-            f"请 planner 先分析目标并制定执行计划。"
+            f"对话历史摘要:\n{chat_history_text}\n\n"
         )
+
+        if plan_rounds > 0 and previous_plan:
+            initial_msg += (
+                f"## 上一轮计划\n{previous_plan}\n\n"
+                f"## 之前的结果\n{previous_result}\n\n"
+                "请 verifier 反馈不完整的原因，planner 制定补充计划。"
+            )
+        else:
+            initial_msg += "请 planner 先分析目标并制定执行计划。"
 
         try:
             user_proxy.initiate_chat(manager, message=initial_msg)
@@ -160,30 +221,20 @@ class AutoGenOrchestrator:
             logger.error("[AutoGenOrch] GroupChat error: %s", exc, exc_info=True)
             if progress_callback:
                 progress_callback(make_log(f"❌ AutoGen error: {exc}"))
-            return f"Error: {exc}"
+            return {"answer": f"Error: {exc}", "plan": "", "plan_rounds": plan_rounds}
 
         if cancel_event and cancel_event.is_set():
-            return "⏹ 已停止"
+            return {"answer": "⏹ 已停止", "plan": "", "plan_rounds": plan_rounds}
 
-        # Extract final answer
         messages = group_chat.messages
-        if messages:
-            for msg in reversed(messages):
-                content = msg.get("content", "").strip()
-                name = msg.get("name", "")
-                if name in ("user_proxy", "chat_manager", "") or not content:
-                    continue
-                if content.endswith("TERMINATE"):
-                    content = content[: -len("TERMINATE")].strip()
-                if content:
-                    return content
-            for msg in reversed(messages):
-                content = msg.get("content", "").strip()
-                if content:
-                    return content
-            return "已完成，但未产生文本输出。"
+        answer = extract_answer(messages)
+        plan_text = extract_plan(messages)
 
-        return "已完成，但未产生文本输出。"
+        return {
+            "answer": answer,
+            "plan": plan_text,
+            "plan_rounds": plan_rounds + 1,
+        }
 
 
 # ============================================================================
@@ -263,6 +314,13 @@ def _create_agents(
     return user_proxy, planner, executor, verifier
 
 
+class _SpeakerState:
+    """Per-invocation mutable state for speaker selection."""
+
+    def __init__(self) -> None:
+        self.executor_rounds: int = 0
+
+
 def _make_speaker_hook(
     cancel_event: threading.Event | None,
     progress_cb: Callable[[dict[str, Any]], None] | None,
@@ -285,8 +343,7 @@ def _make_speaker_hook(
         "user_proxy": "⚙️",
     }
 
-    # Per-invocation state (closure binds to this run only)
-    _state = {"executor_rounds": 0}
+    _state = _SpeakerState()
 
     def _agent_by_name(name: str, groupchat: Any) -> Any | None:
         """Look up an agent by name from the groupchat's agents list."""
@@ -335,7 +392,7 @@ def _make_speaker_hook(
 
         # Planner → Executor
         if name == "planner":
-            _state["executor_rounds"] = 0
+            _state.executor_rounds = 0
             return _agent_by_name("executor", groupchat)
 
         # Executor with tool_call → UserProxy to execute it
@@ -344,10 +401,10 @@ def _make_speaker_hook(
 
         # UserProxy just executed a tool → Executor to process result
         if name == "user_proxy":
-            _state["executor_rounds"] = _state.get("executor_rounds", 0) + 1
+            _state.executor_rounds += 1
             # Safety: if executor keeps calling tools, eventually go to verifier
-            if _state["executor_rounds"] > 10:
-                _state["executor_rounds"] = 0
+            if _state.executor_rounds > 10:
+                _state.executor_rounds = 0
                 return _agent_by_name("verifier", groupchat)
             return _agent_by_name("executor", groupchat)
 

@@ -122,12 +122,16 @@ def tool_cache(
         ttl: 缓存有效期（秒），None 使用默认值 300s。
 
     Returns:
-        装饰器
+        装饰器。装饰后的函数支持 cache=False 参数来跳过缓存，
+        并可通过 __wrapped__ 访问原始函数。
 
     Usage:
         @tool_cache(key_func=lambda query, engine: f"{query}:{engine}", ttl=600)
         def my_tool(query: str, engine: str = "baidu") -> str:
             ...
+
+        # Skip cache for this call:
+        my_tool("query", cache=False)
     """
     _ttl = ttl if ttl is not None else 300.0
 
@@ -136,6 +140,10 @@ def tool_cache(
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            skip_cache = kwargs.pop("cache", True)
+            if not skip_cache:
+                return fn(*args, **kwargs)
+
             if key_func:
                 cache_key = fn.__name__ + ":" + key_func(*args, **kwargs)
             else:
@@ -154,6 +162,7 @@ def tool_cache(
             return result
 
         wrapper._cache = cache_instance
+        wrapper.__wrapped__ = fn
         return wrapper
 
     return decorator

@@ -1,15 +1,20 @@
-"""AgentSession — AI agent with AutoGen-based multi-agent orchestration.
+"""AgentSession — AI agent with hybrid LangGraph + AutoGen orchestration.
 
 Architecture:
-  1. AutoGen GroupChat with 4 specialized agents (Planner, Executor,
-     Verifier, UserProxy) handles complex multi-step tasks via a
-     deterministic state machine.
-  2. Executor (Legacy ReAct) handles simple single-step queries via fast path.
-  3. LLM-based query classification auto-routes between the two paths.
+  1. LangGraph StateGraph handles outer orchestration (routing, state,
+     verification loop), delegating complex tasks to AutoGen GroupChat
+     and simple tasks to the ReAct fast path.
+  2. Executor (LangChain ReAct) handles simple single-step queries.
+  3. AutoGen GroupChat with 4 agents (Planner, Executor, Verifier,
+     UserProxy) handles complex multi-step tasks inside a LangGraph node.
 
-Supports both Plan-and-Execute mode (default, via AutoGen) and legacy ReAct mode.
+Two orchestrator modes supported:
+  - "graph" (default): LangGraph + AutoGen hybrid — better routing,
+        state management, checkpointing, and debug visualization.
+  - "autogen": Original AutoGen-only mode — simpler, battle-tested.
+
 Simple queries are auto-detected via LLM classification and routed to
-the fast ReAct path, skipping the GroupChat overhead.
+the fast ReAct path, skipping the multi-agent overhead.
 """
 
 import logging
@@ -21,60 +26,25 @@ from typing import Any
 from agent.executor import Executor
 from agent.llm.factory import create_llm
 from agent.memory.memory_manager import MemoryManager
-from agent.orchestrator import AutoGenOrchestrator
 from agent.progress import safe_done
+from agent.utils.classifier import classify_query as _classify_query
 from agent.utils.retry import llm_invoke_with_guard
 
+# AutoGen is optional — only imported when using "autogen" mode
+try:
+    from agent.orchestrator import AutoGenOrchestrator
+    _HAS_AUTOGEN = True
+except ImportError:
+    _HAS_AUTOGEN = False
+
+# LangGraph is optional — only imported when using "graph" mode
+try:
+    from agent.graph_orchestrator import GraphOrchestrator
+    _HAS_GRAPH = True
+except ImportError:
+    _HAS_GRAPH = False
+
 logger = logging.getLogger(__name__)
-
-# Minimal prompt for LLM-based query complexity classification.
-# The model must reply with exactly "simple" or "complex" — first token wins.
-_QUERY_CLASSIFIER_PROMPT = """Classify this user request. Reply with exactly one word: "simple" or "complex".
-
-Rules:
-- "simple": a single-step task — math, factual lookup, translation, brief Q&A, read a file, simple web search.
-- "complex": anything requiring multiple steps, planning, chaining tools (e.g. "search X then summarize Y"), analyzing and then acting, or involving conditional logic.
-
-Request: {user_input}
-
-Classification (simple/complex):"""
-
-# Time budget for the classifier call — keep it tight
-_CLASSIFIER_TIMEOUT = 5.0
-_CLASSIFIER_MAX_RETRIES = 1
-
-
-def _classify_query(llm: Any, user_input: str) -> str:
-    """Use the LLM to classify a query as 'simple' or 'complex'.
-
-    Args:
-        llm: LangChain BaseChatModel instance.
-        user_input: The user's raw message.
-
-    Returns:
-        "simple" or "complex". Falls back to "complex" on any error
-        (over-planning is safer than silently skipping steps).
-    """
-    prompt = _QUERY_CLASSIFIER_PROMPT.format(user_input=user_input)
-    try:
-        response = llm_invoke_with_guard(
-            llm, [{"role": "user", "content": prompt}],
-            timeout=_CLASSIFIER_TIMEOUT,
-            max_retries=_CLASSIFIER_MAX_RETRIES,
-        )
-        result = response.content.strip().lower()
-        # First non-empty line, take only the first word
-        first_word = result.split("\n")[0].strip().split()[0] if result else ""
-        if first_word in ("simple", "complex"):
-            return first_word
-        # Fuzzy: if "simple" appears before "complex", treat as simple
-        if "simple" in result and "complex" not in result:
-            return "simple"
-        return "complex"
-    except Exception:
-        # Safe default: treat as complex so user sees steps/reflection
-        logger.warning("Query classifier failed, defaulting to complex path")
-        return "complex"
 
 
 class AgentSession:
@@ -87,54 +57,132 @@ class AgentSession:
         - Auto-routing: simple queries → fast ReAct, complex queries → Plan-and-Execute
 
     Usage:
-        session = AgentSession()
+        session = AgentSession()                              # default: graph mode
+        session = AgentSession(orchestrator_mode="autogen")  # original AutoGen mode
         answer = session.invoke("help me analyze this log", chat_history=[])
     """
 
-    def __init__(self) -> None:
+    def __init__(self, orchestrator_mode: str = "graph") -> None:
         self._lock = threading.Lock()
         self._cancel_flag = threading.Event()
+        self._is_running = False
+        self._orchestrator_mode = orchestrator_mode
+        self._token_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+        }
+        self._current_user_input: str = ""
+        self._current_progress_cb: Callable | None = None
 
         self._llm_provider = create_llm()
         self.memory = MemoryManager()
 
         llm = self._llm_provider.get_model()
-        self._orchestrator = AutoGenOrchestrator()
         self._legacy_executor = Executor(llm)
 
-        logger.info(
-            "AgentSession(AutoGen) created | LLM: %s",
-            self._llm_provider.model_name,
-        )
+        self._graph_orchestrator: Any = GraphOrchestrator() if (orchestrator_mode == "graph" and _HAS_GRAPH) or (_HAS_GRAPH and not _HAS_AUTOGEN) else None
+        self._autogen_orchestrator: Any = AutoGenOrchestrator() if _HAS_AUTOGEN else None
 
-    def _run_in_thread(
+        if self._graph_orchestrator is None and self._autogen_orchestrator is None:
+            logger.warning("No orchestrator available, only basic ReAct mode")
+        elif self._graph_orchestrator is not None:
+            logger.info("AgentSession created | mode=graph | LLM: %s", self._llm_provider.model_name)
+        else:
+            logger.info("AgentSession created | mode=autogen | LLM: %s", self._llm_provider.model_name)
+
+    @property
+    def orchestrator_mode(self) -> str:
+        """Return the current effective orchestrator mode."""
+        if self._orchestrator_mode == "graph" and self._graph_orchestrator is not None:
+            return "graph"
+        if self._orchestrator_mode == "autogen" and self._autogen_orchestrator is not None:
+            return "autogen"
+        if self._graph_orchestrator is not None:
+            return "graph"
+        if self._autogen_orchestrator is not None:
+            return "autogen"
+        return "fallback"
+
+    @property
+    def token_usage(self) -> dict[str, int]:
+        """Return accumulated token usage statistics."""
+        return dict(self._token_usage)
+
+    def _track_tokens(self, response: Any) -> None:
+        """Extract and accumulate token usage from an LLM response."""
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                self._token_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                self._token_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+                self._token_usage["total_tokens"] += usage.get("total_tokens", 0)
+                self._token_usage["calls"] += 1
+        except Exception:
+            pass
+
+    def _track_usage_dict(self, usage: dict[str, int]) -> None:
+        """Accumulate token usage from a dict (e.g. from executor stats)."""
+        self._token_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        self._token_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+        self._token_usage["total_tokens"] += usage.get("total_tokens", 0)
+        self._token_usage["calls"] += 1
+
+    def reset_token_usage(self) -> None:
+        """Reset token usage counters."""
+        self._token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+        }
+
+    def _execute_with_cancel(
         self,
         worker: Callable[[str, list], str],
         user_input: str,
         chat_history: list,
         progress_callback: Callable[[dict[str, Any]], None] | None,
+        extra_context: str = "",
+        cancel_event: threading.Event | None = None,
     ) -> str:
-        """Run a worker function in the calling thread with cancel support.
+        """Execute a worker function with cancel-event support and memory tracking.
+
+        Runs synchronously in the calling thread. If cancel is requested
+        during execution, returns the cancellation message. The final
+        answer is stored into short-term memory regardless of success.
 
         Args:
             worker: Callable(short_term_text, messages) -> answer string
             user_input: Original user message (for memory)
             chat_history: Original chat history (for memory formatting)
             progress_callback: Progress callback
+            extra_context: Additional context (e.g. long-term memory) to append
+            cancel_event: Optional external cancel event
 
         Returns:
             Answer string (or cancel/error message)
         """
         self._cancel_flag.clear()
+        if cancel_event:
+            cancel_event.clear()
+        self._is_running = True
         short_term_text = self.memory.format_short_term(chat_history)
         messages_list = self.memory.format_short_term_messages(chat_history)
 
+        context = short_term_text
+        if extra_context:
+            context = f"{short_term_text}\n\n{extra_context}"
+
         with self._lock:
             try:
-                answer = worker(short_term_text, messages_list)
+                answer = worker(context, messages_list)
             except Exception as exc:
                 logger.error("Worker error: %s", exc, exc_info=True)
                 answer = f"Error: {exc}"
+            finally:
+                self._is_running = False
 
         if self._cancel_flag.is_set():
             answer = "⏹ 已停止"
@@ -143,19 +191,44 @@ class AgentSession:
         safe_done(progress_callback, answer)
         return answer
 
+    def _graph_worker(self, context: str, messages: list) -> str:
+        return self._graph_orchestrator.run(
+            self._current_user_input, context, messages,
+            progress_callback=self._current_progress_cb,
+            cancel_event=self._cancel_flag,
+        )
+
+    def _legacy_worker(self, _: str, messages: list) -> str:
+        return self._legacy_executor.execute(
+            self._current_user_input, messages,
+            progress_callback=self._current_progress_cb,
+            cancel_event=self._cancel_flag,
+        )
+
+    def _autogen_worker(self, context: str, messages: list) -> str:
+        return self._autogen_orchestrator.run(
+            self._current_user_input, context, messages,
+            progress_callback=self._current_progress_cb,
+            cancel_event=self._cancel_flag,
+        )
+
     def invoke(
         self, user_input: str, chat_history: list,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         """Run Plan-and-Execute loop for user input.
 
-        Simple queries are auto-routed to the fast ReAct path via LLM classification,
-        skipping the full planning overhead.
+        In "graph" mode: LangGraph handles routing (classify → simple/complex)
+            internally, plus verification and re-planning loops.
+        In "autogen" mode: LLM classification selects between fast ReAct and
+            AutoGen GroupChat (original behavior).
 
         Args:
             user_input: User message text
             chat_history: Chat history list
             progress_callback: Optional progress event callback
+            cancel_event: Optional external cancel event
 
         Returns:
             Agent's final text response
@@ -163,32 +236,45 @@ class AgentSession:
         if not user_input.strip():
             return ""
 
-        # LLM-based classification: simple → fast ReAct, complex → Plan-and-Execute
+        self._current_user_input = user_input
+        self._current_progress_cb = progress_callback
+
+        long_term_context = self.memory.format_long_term_context(user_input)
+        extra_context = f"## Long-term Memory\n{long_term_context}" if long_term_context else ""
+
+        if self._orchestrator_mode == "graph" and self._graph_orchestrator:
+            return self._execute_with_cancel(
+                self._graph_worker, user_input, chat_history, progress_callback,
+                extra_context=extra_context,
+                cancel_event=cancel_event,
+            )
+
+        if self._autogen_orchestrator is None:
+            logger.warning("[Agent] No orchestrator available, using legacy ReAct")
+            return self._execute_with_cancel(
+                self._legacy_worker, user_input, chat_history, progress_callback,
+                cancel_event=cancel_event,
+            )
+
         classification = _classify_query(self._llm_provider.get_model(), user_input)
         logger.info("[Agent] Query classified as '%s': %s", classification, user_input[:60])
 
         if classification == "simple":
-            def _fast_worker(_: str, messages: list) -> str:
-                return self._legacy_executor.execute(
-                    user_input, messages,
-                    progress_callback=progress_callback,
-                    cancel_event=self._cancel_flag,
-                )
-            return self._run_in_thread(_fast_worker, user_input, chat_history, progress_callback)
-
-        # Full Plan-and-Execute path for complex/multi-step queries
-        def _worker(short_term_text: str, messages: list) -> str:
-            return self._orchestrator.run(
-                user_input, short_term_text, messages,
-                progress_callback=progress_callback,
-                cancel_event=self._cancel_flag,
+            return self._execute_with_cancel(
+                self._legacy_worker, user_input, chat_history, progress_callback,
+                cancel_event=cancel_event,
             )
 
-        return self._run_in_thread(_worker, user_input, chat_history, progress_callback)
+        return self._execute_with_cancel(
+            self._autogen_worker, user_input, chat_history, progress_callback,
+            extra_context=extra_context,
+            cancel_event=cancel_event,
+        )
 
     def invoke_legacy(
         self, user_input: str, chat_history: list,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         """Run legacy ReAct loop (single-step, no planning).
 
@@ -197,13 +283,40 @@ class AgentSession:
         if not user_input.strip():
             return ""
 
+        self._current_user_input = user_input
+        self._current_progress_cb = progress_callback
+
         def _worker(short_term_text: str, messages: list) -> str:
             return self._legacy_executor.execute(
                 user_input, messages,
                 progress_callback=progress_callback,
+                cancel_event=self._cancel_flag,
             )
 
-        return self._run_in_thread(_worker, user_input, chat_history, progress_callback)
+        return self._execute_with_cancel(
+            _worker, user_input, chat_history, progress_callback,
+            cancel_event=cancel_event,
+        )
+
+    def switch_mode(self, mode: str) -> None:
+        """Switch orchestrator mode at runtime.
+
+        Args:
+            mode: "graph" or "autogen"
+        """
+        if mode not in ("graph", "autogen"):
+            raise ValueError(f"Unknown mode: {mode}. Choose 'graph' or 'autogen'.")
+
+        if mode == "graph" and _HAS_GRAPH:
+            self._graph_orchestrator = GraphOrchestrator()
+            self._orchestrator_mode = mode
+            logger.info("Switched to graph mode")
+        elif mode == "autogen" and _HAS_AUTOGEN:
+            self._autogen_orchestrator = AutoGenOrchestrator()
+            self._orchestrator_mode = mode
+            logger.info("Switched to autogen mode")
+        else:
+            logger.warning("Switch failed: required dependency not available for '%s'", mode)
 
     def stop(self) -> None:
         """Request cancellation of the current invocation."""
@@ -213,9 +326,7 @@ class AgentSession:
     @property
     def is_running(self) -> bool:
         """Check if an invocation is currently in progress."""
-        return self._cancel_flag.is_set() or (
-            self._lock.locked()
-        )
+        return self._is_running
 
     def clear_long_term_memory(self) -> str:
         with self._lock:
@@ -223,9 +334,14 @@ class AgentSession:
 
     @property
     def model_info(self) -> str:
+        mode_label = (
+            "LangGraph + AutoGen hybrid"
+            if self._orchestrator_mode == "graph"
+            else "AutoGen GroupChat (Planner + Executor + Verifier)"
+        )
         return (
             f"Model: {self._llm_provider.model_name}  |  "
-            f"Mode: AutoGen GroupChat (Planner + Executor + Verifier)"
+            f"Mode: {mode_label}"
         )
 
     def __enter__(self) -> "AgentSession":

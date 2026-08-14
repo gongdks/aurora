@@ -12,6 +12,7 @@ import ast
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 from langchain.tools import tool
@@ -205,7 +206,7 @@ def code_executor(code: str) -> str:
 
         try:
             result = subprocess.run(
-                ["python", script_path],
+                [sys.executable, script_path],
                 capture_output=True,
                 text=True,
                 timeout=30,

@@ -20,7 +20,7 @@ class ShortTermMemory:
         self.max_rounds = (
             max_rounds if max_rounds is not None else settings.MAX_SHORT_TERM_ROUNDS
         )
-        self.max_messages = self.max_rounds * 4
+        self.max_messages = self.max_rounds * 2
         self._history: list[dict] = []
 
     def add(self, user_msg: str, assistant_msg: str) -> None:
