@@ -14,6 +14,26 @@ def _escape(text: str) -> str:
     return html.escape(text)
 
 
+def thinking_html() -> str:
+    """Render a thinking/typing indicator on the assistant side."""
+    return f"""
+    <div style="margin: 12px 0; text-align: left;" data-thinking="1">
+        <div style="display: inline-block; background-color: {COLORS['assistant_bubble']};
+             border: 1px solid {COLORS['border']}; border-radius: 12px;
+             padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">
+            <div style="display: flex; align-items: center; gap: 8px; color: {COLORS['muted']}; font-size: 14px;">
+                <span style="font-size: 16px;">🤖</span>
+                <span>思考中</span>
+                <span style="display: inline-flex; gap: 3px;">
+                    <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: {COLORS['muted']}; opacity: 0.3;"></span>
+                    <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: {COLORS['muted']}; opacity: 0.6;"></span>
+                    <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: {COLORS['muted']}; opacity: 0.9;"></span>
+                </span>
+            </div>
+        </div>
+    </div>"""
+
+
 def user_message_html(text: str) -> str:
     """Render a user message bubble (right side)."""
     escaped = _escape(text)
@@ -103,10 +123,10 @@ def final_answer_html(answer: str, elapsed: float, tool_count: int) -> str:
                 {rendered}
             </div>
         </div>
-        <div style="margin-top: 6px; display: flex; gap: 16px; font-size: 11px; color: {COLORS['muted']};">
+        <!-- <div style="margin-top: 6px; display: flex; gap: 16px; font-size: 11px; color: {COLORS['muted']};">
             <span>⏱ {sec}</span>
             <span>🔧 {tool_count} 次工具调用</span>
-        </div>
+        </div> -->
     </div>"""
 
 

@@ -34,6 +34,7 @@ from agent.ui.chat_html import (
     event_to_html,
     final_answer_html,
     status_for_log_message,
+    thinking_html,
     tool_html,
     user_message_html,
 )
@@ -78,6 +79,8 @@ class AIAgentWindow(QMainWindow):
         self._streaming_buffer = ""
         self._stream_start_pos = 0
         self._answer_rendered = False
+        self._thinking_start_pos = 0
+        self._thinking_end_pos = 0
 
         self._setup_ui()
         self._setup_connections()
@@ -436,10 +439,35 @@ class AIAgentWindow(QMainWindow):
             self._welcome.setVisible(False)
             self._chat_text.setVisible(True)
 
+    def _show_thinking_indicator(self) -> None:
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._thinking_start_pos = cursor.position()
+        self._chat_text.setTextCursor(cursor)
+        self._chat_text.insertHtml(thinking_html())
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._thinking_end_pos = cursor.position()
+        sb = self._chat_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _remove_thinking_indicator(self) -> None:
+        if self._thinking_start_pos <= 0 or self._thinking_end_pos <= 0:
+            self._thinking_start_pos = 0
+            self._thinking_end_pos = 0
+            return
+        cursor = self._chat_text.textCursor()
+        cursor.setPosition(self._thinking_start_pos)
+        cursor.setPosition(self._thinking_end_pos, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        self._thinking_start_pos = 0
+        self._thinking_end_pos = 0
+
     def _start_streaming(self) -> None:
         self._streaming_active = True
         self._streaming_buffer = ""
         self._answer_rendered = False
+        self._remove_thinking_indicator()
         cursor = self._chat_text.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self._stream_start_pos = cursor.position()
@@ -608,10 +636,14 @@ class AIAgentWindow(QMainWindow):
         if event_type == "streaming_token":
             token = event_dict.get("token", "")
             if not self._streaming_active:
+                self._remove_thinking_indicator()
                 self._start_streaming()
             self._append_streaming_token(token)
             handle_event(self._display, event_dict)
             return
+
+        if event_type in ("tool", "log", "done", "error"):
+            self._remove_thinking_indicator()
 
         had_streaming = self._streaming_active
         if had_streaming and event_type not in ("streaming_token",):
@@ -685,6 +717,7 @@ class AIAgentWindow(QMainWindow):
         self._worker.finished_signal.connect(self._on_finished)
         self._worker.error_signal.connect(self._on_error)
         self._worker.start()
+        self._show_thinking_indicator()
 
     def _on_result(self, result: AgentResult) -> None:
         if result.status == AgentStatus.CANCELLED:
@@ -698,6 +731,7 @@ class AIAgentWindow(QMainWindow):
 
     def _on_finished(self, answer: str) -> None:
         self._is_running = False
+        self._remove_thinking_indicator()
 
         if self._stop_requested:
             self._stop_requested = False
@@ -735,6 +769,7 @@ class AIAgentWindow(QMainWindow):
 
     def _on_error(self, error_msg: str) -> None:
         self._is_running = False
+        self._remove_thinking_indicator()
 
         if self._streaming_active:
             self._end_streaming()
@@ -767,6 +802,7 @@ class AIAgentWindow(QMainWindow):
     def _on_stop(self) -> None:
         if not self._is_running:
             return
+        self._remove_thinking_indicator()
         if self._streaming_active:
             self._end_streaming()
         if self._worker:
