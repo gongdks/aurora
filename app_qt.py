@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import html
 import logging
+import os
+import shutil
 import sys
 import threading
+import time
 from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QCursor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QTextEdit, QVBoxLayout, QWidget, QTextBrowser,
 )
@@ -269,6 +272,13 @@ class AIAgentWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(6)
 
+        self._file_btn = QPushButton("📁")
+        self._file_btn.setObjectName("FileButton")
+        self._file_btn.setFixedSize(40, 36)
+        self._file_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._file_btn.setToolTip("选择文件读取")
+        btn_layout.addWidget(self._file_btn)
+
         self._send_btn = QPushButton("Send")
         self._send_btn.setObjectName("SendButton")
         self._send_btn.setFixedSize(80, 36)
@@ -411,6 +421,7 @@ class AIAgentWindow(QMainWindow):
         layout.addWidget(status)
 
     def _setup_connections(self) -> None:
+        self._file_btn.clicked.connect(self._on_pick_file)
         self._send_btn.clicked.connect(self._on_submit)
         self._stop_btn.clicked.connect(self._on_stop)
         self._clear_btn.clicked.connect(self._on_clear)
@@ -844,6 +855,53 @@ class AIAgentWindow(QMainWindow):
         self._stream_start_pos = 0
         self._answer_rendered = False
         self._reset_stats()
+
+    def _ensure_uploads_dir(self) -> str:
+        uploads_dir = os.path.join(os.path.realpath(settings.FILE_READER_ROOT), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        return uploads_dir
+
+    def _on_pick_file(self) -> None:
+        if self._is_running:
+            return
+
+        file_filter = (
+            "所有文件 (*.*);;"
+            "PDF 文件 (*.pdf);;"
+            "Word 文档 (*.docx);;"
+            "Excel 表格 (*.xlsx);;"
+            "文本文件 (*.txt *.md *.py *.json *.csv *.log *.yaml *.yml *.xml *.html *.css *.js *.ts)"
+        )
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择要读取的文件", settings.FILE_READER_ROOT, file_filter
+        )
+        if not file_path:
+            return
+
+        abs_path = os.path.realpath(file_path)
+        root_dir = os.path.realpath(settings.FILE_READER_ROOT)
+
+        if abs_path.startswith(root_dir + os.sep) or abs_path == root_dir:
+            rel_path = os.path.relpath(abs_path, root_dir).replace("\\", "/")
+        else:
+            uploads_dir = self._ensure_uploads_dir()
+            basename = os.path.basename(file_path)
+            name, ext = os.path.splitext(basename)
+            timestamp = time.strftime("%H%M%S")
+            target_name = f"{name}_{timestamp}{ext}"
+            target_path = os.path.join(uploads_dir, target_name)
+
+            try:
+                shutil.copy2(file_path, target_path)
+            except OSError as exc:
+                QMessageBox.warning(self, "文件复制失败", f"无法复制文件到项目目录：\n{exc}")
+                return
+
+            rel_path = f"uploads/{target_name}"
+
+        prompt = f"读取 {rel_path} 的内容并总结要点"
+        self._input_box.setText(prompt)
+        self._on_submit()
 
     def _run_quick_action(self, prompt: str) -> None:
         if self._is_running:

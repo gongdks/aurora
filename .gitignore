@@ -40,6 +40,7 @@ Desktop.ini
 agent_notes/
 agent_workspace/
 agent_long_term.db
+uploads/
 
 # Test / Coverage
 htmlcov/

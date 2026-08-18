@@ -304,6 +304,20 @@ QPushButton#ClearButton:hover {
     color: %(text)s;
 }
 
+QPushButton#FileButton {
+    background-color: %(surface2)s;
+    color: %(text_secondary)s;
+    border: 1px solid %(border)s;
+    border-radius: 8px;
+    font-size: 18px;
+}
+
+QPushButton#FileButton:hover {
+    background-color: %(accent)s;
+    color: white;
+    border-color: %(accent)s;
+}
+
 QPushButton#QuickButton {
     background-color: %(surface2)s;
     color: %(text)s;
