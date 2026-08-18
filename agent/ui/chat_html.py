@@ -156,6 +156,14 @@ def event_to_html(event: dict[str, Any]) -> str:
 
     if event_type == "log":
         message = event.get("message", "")
+        _HIDDEN_LOG_PREFIXES = (
+            "🤔 **Analyzing",
+            "⚡ **Route:",
+            "⚡ **Running fast",
+            "💭",
+        )
+        if any(message.startswith(p) for p in _HIDDEN_LOG_PREFIXES):
+            return ""
         color = status_for_log_message(message)
         escaped = _escape(message)
         return f"""

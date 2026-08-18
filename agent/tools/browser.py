@@ -649,7 +649,7 @@ def browser_screenshot(filename: str = "screenshot.png") -> str:
             return f"❌ {error}"
 
         try:
-            safe = safe_resolve(filename, settings.CODE_WORKDIR)
+            safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         except ValueError as exc:
             return f"Path error: {exc}"
 

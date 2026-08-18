@@ -46,7 +46,7 @@ def file_writer(filename: str, content: str) -> str:
         content: 要写入的完整文本内容
     """
     try:
-        safe = safe_resolve(filename, settings.CODE_WORKDIR)
+        safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         _write_file(safe, content)
         lines = content.count("\n") + 1
         return f"✅ 已写入 {filename}（{len(content)} 字符，{lines} 行）"
@@ -69,7 +69,7 @@ def file_editor(filename: str, old_text: str, new_text: str) -> str:
         new_text: 替换后的文本
     """
     try:
-        safe = safe_resolve(filename, settings.CODE_WORKDIR)
+        safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
             return f"❌ 文件不存在：{filename}"
         content = _read_file(safe)
@@ -99,7 +99,7 @@ def file_editor_all(filename: str, old_text: str, new_text: str) -> str:
         new_text: 替换后的文本
     """
     try:
-        safe = safe_resolve(filename, settings.CODE_WORKDIR)
+        safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
             return f"❌ 文件不存在：{filename}"
         content = _read_file(safe)
@@ -137,7 +137,7 @@ def file_editor_multiline(
         replace_all: 是否替换所有匹配（默认 False，仅替换第一处）
     """
     try:
-        safe = safe_resolve(filename, settings.CODE_WORKDIR)
+        safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
             return f"❌ 文件不存在：{filename}"
         content = _read_file(safe)
@@ -179,15 +179,15 @@ def file_editor_multiline(
 @register
 @tool
 def file_list(directory: str = ".") -> str:
-    """List files in a directory.
+    """List files in a directory (within project root).
 
-    Supports Chinese folder aliases: 桌面->Desktop, 文档->Documents, etc.
+    Use directory_list for standard directory listing with sizes.
 
     Args:
-        directory: Directory path relative to root, defaults to "."
+        directory: Directory path relative to project root, defaults to "."
     """
     try:
-        safe = safe_resolve(directory, settings.CODE_WORKDIR)
+        safe = safe_resolve(directory, settings.FILE_READER_ROOT)
         if not os.path.isdir(safe):
             return f"Not a directory: {directory}"
         entries = sorted(os.listdir(safe))
