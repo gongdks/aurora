@@ -255,7 +255,13 @@ class GraphOrchestrator:
         if self._cancel_event and self._cancel_event.is_set():
             return {"result": "⏹ 已停止", "is_done": True}
 
+        if self._progress_cb:
+            self._progress_cb(make_log("🤔 **Analyzing query complexity...**"))
+
         classification = classify_query(self._llm, state["user_input"])
+
+        if self._progress_cb:
+            self._progress_cb(make_log(f"⚡ **Route: {classification}**"))
 
         return {"classification": classification}
 
