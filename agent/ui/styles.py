@@ -234,35 +234,33 @@ QTextBrowser#ChatText tool-block:hover {
 QFrame#InputContainer {
     background-color: %(surface)s;
     border: 1px solid %(border)s;
-    border-radius: 12px;
+    border-radius: 16px;
 }
 
 QTextEdit#InputBox {
-    background-color: %(surface2)s;
-    border: 1px solid %(border)s;
-    border-radius: 8px;
+    background-color: transparent;
+    border: none;
     color: %(text)s;
     font-size: 14px;
-    padding: 8px 12px;
-    selection-background-color: %(accent)s;
+    padding: 4px 2px;
+    selection-background-color: rgba(74, 108, 247, 0.3);
 }
 
 QTextEdit#InputBox:focus {
-    border-color: %(accent)s;
+    border: none;
 }
 
 QPushButton#SendButton {
     background-color: %(accent)s;
     color: white;
     border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 13px;
-    padding: 0px 16px;
+    border-radius: 17px;
+    font-size: 16px;
+    font-weight: 700;
 }
 
 QPushButton#SendButton:hover {
-    background-color: #4a6cf7;
+    background-color: #3a5ce5;
 }
 
 QPushButton#SendButton:disabled {
@@ -271,51 +269,75 @@ QPushButton#SendButton:disabled {
 }
 
 QPushButton#StopButton {
-    background-color: transparent;
-    color: %(red)s;
-    border: 1px solid %(red)s;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 13px;
-    padding: 0px 16px;
+    background-color: %(red)s;
+    color: white;
+    border: none;
+    border-radius: 17px;
+    font-size: 14px;
+    font-weight: 700;
 }
 
 QPushButton#StopButton:hover {
-    background-color: rgba(207, 34, 46, 0.1);
+    background-color: #b91c1c;
 }
 
 QPushButton#StopButton:disabled {
-    border-color: %(muted)s;
-    color: %(muted)s;
+    background-color: %(muted)s;
 }
 
 QPushButton#ClearButton {
     background-color: transparent;
     color: %(text_secondary)s;
     border: 1px solid %(border)s;
-    border-radius: 8px;
-    font-weight: 500;
-    font-size: 13px;
-    padding: 0px 16px;
+    border-radius: 14px;
+    font-size: 12px;
+    padding: 0px 14px;
 }
 
 QPushButton#ClearButton:hover {
     background-color: %(surface2)s;
-    color: %(text)s;
+    color: %(accent)s;
+    border-color: %(accent)s;
 }
 
 QPushButton#FileButton {
-    background-color: %(surface2)s;
+    background-color: transparent;
     color: %(text_secondary)s;
     border: 1px solid %(border)s;
-    border-radius: 8px;
-    font-size: 18px;
+    border-radius: 14px;
+    font-size: 14px;
 }
 
 QPushButton#FileButton:hover {
     background-color: %(accent)s;
     color: white;
     border-color: %(accent)s;
+}
+
+QFrame#FileChip {
+    background-color: %(surface2)s;
+    border: 1px solid %(border)s;
+    border-radius: 12px;
+}
+
+QLabel#ChipLabel {
+    font-size: 12px;
+    color: %(text)s;
+    max-width: 120px;
+}
+
+QPushButton#ChipClose {
+    background-color: transparent;
+    color: %(muted)s;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QPushButton#ChipClose:hover {
+    background-color: %(red)s;
+    color: white;
 }
 
 QPushButton#QuickButton {

@@ -43,8 +43,8 @@ _SAFE_NODE_TYPES = frozenset({
     "Call", "Attribute", "Subscript", "Slice",
     "List", "Tuple", "Set", "Dict", "DictComp",
     "ListComp", "SetComp", "GeneratorExp",
-    "JoinedStr", "FormattedValue", "f-string",
-    "Starred", "NamedExpr",
+    "JoinedStr", "FormattedValue",
+    "Starred", "NamedExpr", "keyword",
     # Statements
     "Assign", "AugAssign", "AnnAssign",
     "If", "For", "While", "Break", "Continue", "Pass",

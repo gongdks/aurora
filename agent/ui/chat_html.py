@@ -17,12 +17,14 @@ def _escape(text: str) -> str:
 def thinking_html() -> str:
     """Render a thinking/typing indicator on the assistant side."""
     return f"""
-    <div style="margin: 12px 0; text-align: left;" data-thinking="1">
+    <div style="margin: 12px 0; display: flex; align-items: flex-start; gap: 10px; text-align: left;" data-thinking="1">
+        <div style="flex-shrink: 0; width: 32px; height: 32px; background-color: {COLORS['accent']};
+             border-radius: 8px; display: flex; align-items: center; justify-content: center;
+             font-size: 16px; color: white;">🤖</div>
         <div style="display: inline-block; background-color: {COLORS['assistant_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 12px;
-             padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">
-            <div style="display: flex; align-items: center; gap: 8px; color: {COLORS['muted']}; font-size: 14px;">
-                <span style="font-size: 16px;">🤖</span>
+             padding: 12px 16px; line-height: 1.7;">
+            <div style="display: flex; align-items: center; gap: 8px; color: {COLORS['muted']}; font-size: 13px;">
                 <span>思考中</span>
                 <span style="display: inline-flex; gap: 3px;">
                     <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: {COLORS['muted']}; opacity: 0.3;"></span>
@@ -35,15 +37,19 @@ def thinking_html() -> str:
 
 
 def user_message_html(text: str) -> str:
-    """Render a user message bubble (right side)."""
+    """Render a user message bubble (right side) with logo."""
     escaped = _escape(text)
     return f"""
-    <table align="right" cellspacing="0" cellpadding="0" style="margin: 8px 0;">
-    <tr><td style="background-color: {COLORS['user_bubble']};
-         border: 1px solid {COLORS['border']}; border-radius: 12px;
-         padding: 10px 16px;">
-        <div style="color: {COLORS['text']}; text-align: left;">{escaped}</div>
-    </td></tr></table>"""
+    <div style="margin: 8px 0; display: flex; align-items: flex-start; gap: 10px; justify-content: flex-end; text-align: left;">
+        <div style="display: inline-block; background-color: {COLORS['user_bubble']};
+             border: 1px solid {COLORS['border']}; border-radius: 12px;
+             padding: 10px 16px;">
+            <div style="color: {COLORS['text']};">{escaped}</div>
+        </div>
+        <div style="flex-shrink: 0; width: 32px; height: 32px; background-color: {COLORS['surface2']};
+             border: 1px solid {COLORS['border']}; border-radius: 8px; display: flex;
+             align-items: center; justify-content: center; font-size: 16px;">👤</div>
+    </div>"""
 
 
 def assistant_header_html() -> str:
@@ -111,11 +117,13 @@ def cancelled_html() -> str:
 
 
 def final_answer_html(answer: str, elapsed: float, tool_count: int) -> str:
-    """Render the final answer with metadata (left side) — with Markdown support."""
+    """Render the final answer with logo — with Markdown support."""
     rendered = render_markdown(answer)
-    sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
     return f"""
-    <div style="margin: 12px 0; text-align: left;">
+    <div style="margin: 12px 0; display: flex; align-items: flex-start; gap: 10px; text-align: left;">
+        <div style="flex-shrink: 0; width: 32px; height: 32px; background-color: {COLORS['accent']};
+             border-radius: 8px; display: flex; align-items: center; justify-content: center;
+             font-size: 16px; color: white;">🤖</div>
         <div style="display: inline-block; background-color: {COLORS['assistant_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 12px;
              padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">
@@ -123,10 +131,6 @@ def final_answer_html(answer: str, elapsed: float, tool_count: int) -> str:
                 {rendered}
             </div>
         </div>
-        <!-- <div style="margin-top: 6px; display: flex; gap: 16px; font-size: 11px; color: {COLORS['muted']};">
-            <span>⏱ {sec}</span>
-            <span>🔧 {tool_count} 次工具调用</span>
-        </div> -->
     </div>"""
 
 

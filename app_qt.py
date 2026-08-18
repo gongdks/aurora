@@ -15,7 +15,6 @@ import os
 import shutil
 import sys
 import threading
-import time
 from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer
@@ -84,6 +83,7 @@ class AIAgentWindow(QMainWindow):
         self._answer_rendered = False
         self._thinking_start_pos = 0
         self._thinking_end_pos = 0
+        self._uploaded_files: list[dict] = []
 
         self._setup_ui()
         self._setup_connections()
@@ -192,6 +192,14 @@ class AIAgentWindow(QMainWindow):
         layout.addWidget(accent)
 
     def _build_chat(self, layout: QVBoxLayout) -> None:
+        self._chat_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._chat_splitter.setObjectName("ChatSplitter")
+        self._chat_splitter.setHandleWidth(6)
+        self._chat_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background-color: transparent; }}"
+            f"QSplitter::handle:hover {{ background-color: {COLORS['accent']}; }}"
+        )
+
         container = QFrame()
         container.setObjectName("ChatContainer")
 
@@ -248,58 +256,80 @@ class AIAgentWindow(QMainWindow):
         self._chat_text.customContextMenuRequested.connect(self._show_context_menu)
         inner.addWidget(self._chat_text, 1)
 
-        layout.addWidget(container, 1)
-        self._build_input_area(layout)
+        self._chat_splitter.addWidget(container)
+        self._build_input_area(self._chat_splitter)
 
-    def _build_input_area(self, layout: QVBoxLayout) -> None:
+        self._chat_splitter.setStretchFactor(0, 1)
+        self._chat_splitter.setStretchFactor(1, 0)
+        self._chat_splitter.setSizes([600, 120])
+
+        layout.addWidget(self._chat_splitter, 1)
+
+    def _build_input_area(self, splitter: QSplitter) -> None:
         input_container = QFrame()
         input_container.setObjectName("InputContainer")
 
-        input_layout = QHBoxLayout(input_container)
-        input_layout.setContentsMargins(12, 10, 10, 10)
-        input_layout.setSpacing(8)
+        input_layout = QVBoxLayout(input_container)
+        input_layout.setContentsMargins(16, 12, 14, 10)
+        input_layout.setSpacing(6)
+
+        self._chip_row = QHBoxLayout()
+        self._chip_row.setSpacing(6)
+        self._chip_row.setContentsMargins(0, 0, 0, 0)
+        self._chip_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        input_layout.addLayout(self._chip_row)
+
+        self._chip_widgets: list[tuple[QFrame, str]] = []
 
         self._input_box = QTextEdit()
         self._input_box.setObjectName("InputBox")
-        self._input_box.setPlaceholderText("输入你的问题，Enter 发送，Shift+Enter 换行...")
-        self._input_box.setMinimumHeight(44)
-        self._input_box.setMaximumHeight(150)
+        self._input_box.setPlaceholderText("给 AI Agent 发送消息... (Enter 发送，Shift+Enter 换行)")
+        self._input_box.setMinimumHeight(48)
         self._input_box.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._input_box.setAcceptRichText(False)
+        self._input_box.setStyleSheet(
+            f"QTextEdit#InputBox {{ border: none; background-color: transparent; "
+            f"color: {COLORS['text']}; font-size: 14px; padding: 4px 2px; }}"
+        )
         self._input_box.textChanged.connect(self._adjust_input_height)
         input_layout.addWidget(self._input_box, 1)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
 
-        self._file_btn = QPushButton("📁")
+        self._file_btn = QPushButton("📎")
         self._file_btn.setObjectName("FileButton")
-        self._file_btn.setFixedSize(40, 36)
+        self._file_btn.setFixedSize(34, 30)
         self._file_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._file_btn.setToolTip("选择文件读取")
-        btn_layout.addWidget(self._file_btn)
+        self._file_btn.setToolTip("选择文件（可多选）")
+        toolbar.addWidget(self._file_btn)
 
-        self._send_btn = QPushButton("Send")
-        self._send_btn.setObjectName("SendButton")
-        self._send_btn.setFixedSize(80, 36)
-        self._send_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_layout.addWidget(self._send_btn)
-
-        self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setObjectName("StopButton")
-        self._stop_btn.setFixedSize(80, 36)
-        self._stop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._stop_btn.setEnabled(False)
-        btn_layout.addWidget(self._stop_btn)
-
-        self._clear_btn = QPushButton("Clear")
+        self._clear_btn = QPushButton("新建对话")
         self._clear_btn.setObjectName("ClearButton")
-        self._clear_btn.setFixedSize(80, 36)
+        self._clear_btn.setFixedHeight(28)
         self._clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_layout.addWidget(self._clear_btn)
+        toolbar.addWidget(self._clear_btn)
 
-        input_layout.addLayout(btn_layout)
-        layout.addWidget(input_container)
+        toolbar.addStretch()
+
+        self._send_btn = QPushButton("↑")
+        self._send_btn.setObjectName("SendButton")
+        self._send_btn.setFixedSize(34, 34)
+        self._send_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._send_btn.setToolTip("发送 (Enter)")
+        toolbar.addWidget(self._send_btn)
+
+        self._stop_btn = QPushButton("■")
+        self._stop_btn.setObjectName("StopButton")
+        self._stop_btn.setFixedSize(34, 34)
+        self._stop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._stop_btn.setToolTip("停止生成")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.setVisible(False)
+        toolbar.addWidget(self._stop_btn)
+
+        input_layout.addLayout(toolbar)
+        splitter.addWidget(input_container)
 
     def _build_sidebar(self, layout: QVBoxLayout) -> None:
         card1 = self._create_card("🤖 模型信息")
@@ -514,21 +544,20 @@ class AIAgentWindow(QMainWindow):
         sb.setValue(sb.maximum())
 
     def _append_streaming_metadata(self) -> None:
-        elapsed = self._display.elapsed
-        tc = self._display.tool_count
-        sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._chat_text.setTextCursor(cursor)
-        self._chat_text.insertHtml(
-            f'<div style="margin-top: 6px; display: flex; gap: 16px; '
-            f'font-size: 11px; color: {COLORS["muted"]};">'
-            f'<span>⏱ {sec}</span>'
-            f'<span>🔧 {tc} 次工具调用</span>'
-            f'</div>'
-        )
-        sb = self._chat_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        # elapsed = self._display.elapsed
+        # tc = self._display.tool_count
+        # sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
+        # cursor = self._chat_text.textCursor()
+        # cursor.movePosition(cursor.MoveOperation.End)
+        # self._chat_text.setTextCursor(cursor)
+        # self._chat_text.insertHtml(
+        #     f'<div style="margin-top: 6px; display: flex; gap: 16px; '
+        #     f'font-size: 11px; color: {COLORS["muted"]};">'
+        #     f'<span>⏱ {sec}</span>'
+        #     f'<span>🔧 {tc} 次工具调用</span>'
+        #     f'</div>'
+        # )
+        pass
 
     def _append_html(self, html_str: str) -> None:
         if self._streaming_active:
@@ -573,8 +602,8 @@ class AIAgentWindow(QMainWindow):
     def _adjust_input_height(self) -> None:
         doc = self._input_box.document()
         h = int(doc.size().height()) + self._input_box.frameWidth() * 2 + 4
-        h = max(44, min(h, 150))
-        self._input_box.setFixedHeight(h)
+        h = max(48, h)
+        self._input_box.setMinimumHeight(h)
 
     def _show_context_menu(self, pos) -> None:
         cursor = self._chat_text.textCursor()
@@ -692,6 +721,13 @@ class AIAgentWindow(QMainWindow):
     # Actions
     # ------------------------------------------------------------------
 
+    def _set_buttons_state(self, running: bool) -> None:
+        self._send_btn.setVisible(not running)
+        self._send_btn.setEnabled(not running)
+        self._stop_btn.setVisible(running)
+        self._stop_btn.setEnabled(running)
+        self._input_box.setEnabled(not running)
+
     def _on_submit(self) -> None:
         if self._is_running:
             return
@@ -699,6 +735,9 @@ class AIAgentWindow(QMainWindow):
         if not message:
             return
         self._input_box.clear()
+        file_hint = self._build_file_hint()
+        if file_hint:
+            message = file_hint + message
         self._submit_message(message)
 
     def _submit_message(self, message: str) -> None:
@@ -717,9 +756,7 @@ class AIAgentWindow(QMainWindow):
         self._display.reset()
         self._reset_stats()
 
-        self._send_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        self._input_box.setEnabled(False)
+        self._set_buttons_state(True)
         self._set_status("思考中...", running=True)
 
         self._worker = AgentWorker(self._session, message, self._history)
@@ -746,9 +783,7 @@ class AIAgentWindow(QMainWindow):
 
         if self._stop_requested:
             self._stop_requested = False
-            self._send_btn.setEnabled(True)
-            self._stop_btn.setEnabled(False)
-            self._input_box.setEnabled(True)
+            self._set_buttons_state(False)
             self._input_box.setFocus()
             self._set_status("就绪")
             self._update_stats()
@@ -767,9 +802,7 @@ class AIAgentWindow(QMainWindow):
         self._answer_rendered = False
         self._history.append({"role": "assistant", "content": answer})
 
-        self._send_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        self._input_box.setEnabled(True)
+        self._set_buttons_state(False)
         self._input_box.setFocus()
         self._set_status("就绪")
         self._update_stats()
@@ -787,9 +820,7 @@ class AIAgentWindow(QMainWindow):
 
         if self._stop_requested:
             self._stop_requested = False
-            self._send_btn.setEnabled(True)
-            self._stop_btn.setEnabled(False)
-            self._input_box.setEnabled(True)
+            self._set_buttons_state(False)
             self._input_box.setFocus()
             self._set_status("就绪")
             self._update_stats()
@@ -799,9 +830,7 @@ class AIAgentWindow(QMainWindow):
             return
 
         self._append_html(error_html(f"  ❌ Error: {error_msg}"))
-        self._send_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        self._input_box.setEnabled(True)
+        self._set_buttons_state(False)
         self._input_box.setFocus()
         self._set_status("就绪")
         self._update_stats()
@@ -822,9 +851,7 @@ class AIAgentWindow(QMainWindow):
         self._stop_requested = True
         self._append_html(cancelled_html())
         self._is_running = False
-        self._send_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        self._input_box.setEnabled(True)
+        self._set_buttons_state(False)
         self._input_box.setFocus()
         self._set_status("就绪")
         self._update_stats()
@@ -855,6 +882,7 @@ class AIAgentWindow(QMainWindow):
         self._stream_start_pos = 0
         self._answer_rendered = False
         self._reset_stats()
+        self._clear_file_chips()
 
     def _ensure_uploads_dir(self) -> str:
         uploads_dir = os.path.join(os.path.realpath(settings.FILE_READER_ROOT), "uploads")
@@ -872,36 +900,136 @@ class AIAgentWindow(QMainWindow):
             "Excel 表格 (*.xlsx);;"
             "文本文件 (*.txt *.md *.py *.json *.csv *.log *.yaml *.yml *.xml *.html *.css *.js *.ts)"
         )
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择要读取的文件", settings.FILE_READER_ROOT, file_filter
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择要读取的文件（可多选）", settings.FILE_READER_ROOT, file_filter
         )
-        if not file_path:
+        if not file_paths:
             return
 
-        abs_path = os.path.realpath(file_path)
         root_dir = os.path.realpath(settings.FILE_READER_ROOT)
 
-        if abs_path.startswith(root_dir + os.sep) or abs_path == root_dir:
-            rel_path = os.path.relpath(abs_path, root_dir).replace("\\", "/")
-        else:
-            uploads_dir = self._ensure_uploads_dir()
+        for file_path in file_paths:
+            abs_path = os.path.realpath(file_path)
             basename = os.path.basename(file_path)
-            name, ext = os.path.splitext(basename)
-            timestamp = time.strftime("%H%M%S")
-            target_name = f"{name}_{timestamp}{ext}"
-            target_path = os.path.join(uploads_dir, target_name)
 
-            try:
-                shutil.copy2(file_path, target_path)
-            except OSError as exc:
-                QMessageBox.warning(self, "文件复制失败", f"无法复制文件到项目目录：\n{exc}")
-                return
+            if abs_path.startswith(root_dir + os.sep) or abs_path == root_dir:
+                rel_path = os.path.relpath(abs_path, root_dir).replace("\\", "/")
+                self._uploaded_files.append({
+                    "name": basename,
+                    "rel": rel_path,
+                    "abs": abs_path,
+                    "owned": False,
+                })
+            else:
+                uploads_dir = self._ensure_uploads_dir()
+                target_path = os.path.join(uploads_dir, basename)
+                if os.path.exists(target_path):
+                    name, ext = os.path.splitext(basename)
+                    counter = 1
+                    while os.path.exists(target_path):
+                        target_name = f"{name}_{counter}{ext}"
+                        target_path = os.path.join(uploads_dir, target_name)
+                        counter += 1
+                    basename = os.path.basename(target_path)
 
-            rel_path = f"uploads/{target_name}"
+                try:
+                    shutil.copy2(file_path, target_path)
+                except OSError as exc:
+                    QMessageBox.warning(self, "文件复制失败", f"无法复制文件到项目目录：\n{exc}")
+                    continue
 
-        prompt = f"读取 {rel_path} 的内容并总结要点"
-        self._input_box.setText(prompt)
-        self._on_submit()
+                self._uploaded_files.append({
+                    "name": basename,
+                    "rel": f"uploads/{basename}",
+                    "abs": target_path,
+                    "owned": True,
+                })
+
+            self._add_file_chip(basename, self._uploaded_files[-1]["rel"])
+
+        self._input_box.setFocus()
+
+    def _add_file_chip(self, name: str, rel_path: str) -> None:
+        chip = QFrame()
+        chip.setObjectName("FileChip")
+        layout = QHBoxLayout(chip)
+        layout.setContentsMargins(10, 4, 4, 4)
+        layout.setSpacing(6)
+
+        icon = QLabel("📄")
+        icon.setStyleSheet("font-size: 13px;")
+        layout.addWidget(icon)
+
+        label = QLabel(name)
+        label.setObjectName("ChipLabel")
+        label.setToolTip(rel_path)
+        layout.addWidget(label)
+
+        close_btn = QPushButton("×")
+        close_btn.setObjectName("ChipClose")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        close_btn.setToolTip("移除")
+        close_btn.clicked.connect(lambda _=False, c=chip, r=rel_path: self._remove_file_chip(c, r))
+        layout.addWidget(close_btn)
+
+        self._chip_row.addWidget(chip)
+        self._chip_widgets.append((chip, rel_path))
+
+    def _remove_file_chip(self, chip: QFrame, rel_path: str) -> None:
+        chip.setParent(None)
+        chip.deleteLater()
+        self._chip_widgets = [(c, r) for c, r in self._chip_widgets if c is not chip]
+
+        for i, f in enumerate(self._uploaded_files):
+            if f["rel"] == rel_path:
+                if f["owned"] and os.path.isfile(f["abs"]):
+                    try:
+                        os.remove(f["abs"])
+                    except OSError:
+                        pass
+                self._uploaded_files.pop(i)
+                break
+
+    def _clear_file_chips(self) -> None:
+        for chip, _ in self._chip_widgets:
+            chip.setParent(None)
+            chip.deleteLater()
+        self._chip_widgets.clear()
+
+        for f in self._uploaded_files:
+            if f["owned"] and os.path.isfile(f["abs"]):
+                try:
+                    os.remove(f["abs"])
+                except OSError:
+                    pass
+        self._uploaded_files.clear()
+
+    def _build_file_hint(self) -> str:
+        if not self._uploaded_files:
+            return ""
+        names = ", ".join(f["name"] for f in self._uploaded_files)
+        return f"[文件: {names}]\n"
+
+    def closeEvent(self, event) -> None:
+        self._cleanup_uploads()
+        super().closeEvent(event)
+
+    def _cleanup_uploads(self) -> None:
+        for f in self._uploaded_files:
+            if f["owned"] and os.path.isfile(f["abs"]):
+                try:
+                    os.remove(f["abs"])
+                except OSError:
+                    pass
+        self._uploaded_files.clear()
+
+        uploads_dir = os.path.join(os.path.realpath(settings.FILE_READER_ROOT), "uploads")
+        try:
+            if os.path.isdir(uploads_dir) and not os.listdir(uploads_dir):
+                os.rmdir(uploads_dir)
+        except OSError:
+            pass
 
     def _run_quick_action(self, prompt: str) -> None:
         if self._is_running:
