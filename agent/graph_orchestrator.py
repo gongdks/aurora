@@ -326,9 +326,11 @@ class GraphOrchestrator:
 Create a clear, step-by-step execution plan to achieve the user's goal.
 Break it into 2-5 concrete, actionable steps. Each step should be a single tool call or a simple action.
 
+IMPORTANT: You MUST respond in Chinese (中文). All step descriptions must be in Chinese.
+
 Respond with exactly one step per line, numbered:
-1. [Step description — be specific about what to do]
-2. [Step description]
+1. [步骤描述 — 具体说明要做什么]
+2. [步骤描述]
 ...
 
 Only output the numbered steps, nothing else."""
@@ -397,6 +399,8 @@ Current step: {step_description}
 
 Perform the required action using available tools. If you need to read files,
 search the web, or run code, use the appropriate tools now.
+
+IMPORTANT: You MUST respond in Chinese (中文). Think and respond in Chinese.
 
 After completing this step, provide a brief summary of what you did and what you found."""
 
@@ -468,9 +472,11 @@ Original user goal: {user_input}
 
 Based on the execution results above, is the user's goal fully achieved?
 
-Answer exactly 'yes' or 'no', then provide a brief explanation.
-If yes, also provide a concise final answer to the user.
-If no, explain what is still missing."""
+IMPORTANT: You MUST respond in Chinese (中文).
+
+Answer exactly 'yes' or 'no', then provide a brief explanation in Chinese.
+If yes, also provide a concise final answer to the user in Chinese.
+If no, explain what is still missing in Chinese."""
 
         try:
             verification = self._stream_llm_response(prompt)
@@ -553,6 +559,9 @@ Verification feedback: {verification_feedback[:500]}
 
 Create a NEW execution plan to address the remaining work.
 Only list steps that still need to be done.
+
+IMPORTANT: You MUST respond in Chinese (中文). All step descriptions must be in Chinese.
+
 Respond with numbered steps only."""
 
         try:

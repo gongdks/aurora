@@ -70,7 +70,7 @@ def error_html(text: str) -> str:
     """Render an error message block."""
     escaped = _escape(text[:500])
     return f"""
-    <div style="margin: 8px 0; background-color: rgba(248, 113, 113, 0.1);
+    <div style="margin: 8px 0; background-color: rgba(207, 34, 46, 0.08);
          border: 1px solid {COLORS['red']}; border-radius: 8px; padding: 10px 14px;">
         <div style="color: {COLORS['red']}; font-size: 13px; font-weight: 600;">Error</div>
         <div style="color: {COLORS['text']}; font-size: 13px; margin-top: 4px;">{escaped}</div>

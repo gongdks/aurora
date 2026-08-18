@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 COLORS: dict[str, str] = {
-    "bg": "#0f1117",
-    "surface": "#1a1d27",
-    "surface2": "#252936",
-    "border": "#2e3343",
-    "text": "#e6e8ef",
-    "text_secondary": "#9aa0b4",
-    "muted": "#6b7186",
-    "accent": "#6c8cff",
-    "green": "#4ade80",
-    "yellow": "#fbbf24",
-    "red": "#f87171",
-    "user_bubble": "#2a3352",
-    "assistant_bubble": "#1e2433",
-    "tool_bubble": "#1f2a3d",
-    "code_bg": "#0d1117",
+    "bg": "#f5f6f8",
+    "surface": "#ffffff",
+    "surface2": "#f0f2f5",
+    "border": "#d9dce1",
+    "text": "#1f2328",
+    "text_secondary": "#656d76",
+    "muted": "#8b949e",
+    "accent": "#4a6cf7",
+    "green": "#28a745",
+    "yellow": "#d29922",
+    "red": "#cf222e",
+    "user_bubble": "#dce8ff",
+    "assistant_bubble": "#f0f2f5",
+    "tool_bubble": "#fff8e1",
+    "code_bg": "#f6f8fa",
 }
 
 QSS = """
@@ -95,7 +95,7 @@ QTextBrowser#ChatText a {
 
 QTextBrowser#ChatText code {
     background-color: %(code_bg)s;
-    color: #e6edf3;
+    color: #24292f;
     border-radius: 4px;
     padding: 2px 6px;
     font-family: "Consolas", "Monaco", monospace;
@@ -142,7 +142,7 @@ QPushButton#SendButton {
 }
 
 QPushButton#SendButton:hover {
-    background-color: #5b7dff;
+    background-color: #4a6cf7;
 }
 
 QPushButton#SendButton:disabled {
@@ -161,7 +161,7 @@ QPushButton#StopButton {
 }
 
 QPushButton#StopButton:hover {
-    background-color: rgba(248, 113, 113, 0.15);
+    background-color: rgba(207, 34, 46, 0.1);
 }
 
 QPushButton#StopButton:disabled {
