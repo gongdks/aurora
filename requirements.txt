@@ -1,4 +1,4 @@
-# AI Agent — Python dependencies
+# AI Agent - Python dependencies
 # Install: pip install -r requirements.txt
 
 # Core
@@ -18,6 +18,12 @@ duckduckgo-search>=6.0.0
 # Web scraping
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+
+# Browser automation
+playwright>=1.40.0
+
+# Markdown rendering
+mistune>=3.0.0
 
 # Config
 python-dotenv>=1.0.0

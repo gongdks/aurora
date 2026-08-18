@@ -29,6 +29,8 @@ dependencies = [
     "duckduckgo-search>=6.0.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
+    "playwright>=1.40.0",
+    "mistune>=3.0.0",
     "python-dotenv>=1.0.0",
     "pydantic-settings>=2.0.0",
 ]
