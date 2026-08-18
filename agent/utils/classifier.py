@@ -1,4 +1,11 @@
-"""Query classifier — hybrid keyword + LLM with confidence scoring and cache."""
+"""Query classifier — hybrid keyword + LLM + adaptive feedback with confidence scoring and cache.
+
+Three-tier adaptive design:
+  Tier 1: Learned corrections (feedback from past runs)
+  Tier 2: Keyword weight scoring with conflict resolution
+  Tier 3: LLM-based classification (fallback)
+  Runtime: Budget monitoring auto-upgrades/downgrades paths.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +26,69 @@ class ClassificationResult:
     detail: str = ""
 
 
-class ClassifierCache:
-    _instance: ClassifierCache | None = None
+# ---------------------------------------------------------------------------
+# Learned classifications — feedback from runtime execution
+# ---------------------------------------------------------------------------
 
-    def __new__(cls) -> ClassifierCache:
+class _LearnedClassifications:
+    """Stores learned corrections when runtime proves classification wrong.
+
+    E.g. a query classified as "simple" that took >30s and used 5 tool calls
+    gets reclassified as "complex" here, avoiding repeated misrouting.
+    """
+
+    def __init__(self) -> None:
+        self._upgrades: OrderedDict[str, ClassificationResult] = OrderedDict()
+        self._downgrades: OrderedDict[str, ClassificationResult] = OrderedDict()
+        self._max_size: int = 128
+
+    def get(self, key: str) -> ClassificationResult | None:
+        entry = self._upgrades.get(key) or self._downgrades.get(key)
+        if entry is not None:
+            logger.debug("[Learned] hit: %s -> %s (from %s)", key[:40], entry.label, entry.source)
+        return entry
+
+    def record_upgrade(self, key: str, reason: str) -> None:
+        result = ClassificationResult(
+            label="complex",
+            confidence=0.9,
+            source="learned_upgrade",
+            detail=reason,
+        )
+        self._upgrades[key] = result
+        self._upgrades.move_to_end(key)
+        while len(self._upgrades) > self._max_size:
+            self._upgrades.popitem(last=False)
+        self._downgrades.pop(key, None)
+        logger.info("[Learned] upgraded '%s' -> complex (reason: %s)", key[:40], reason)
+
+    def record_downgrade(self, key: str, reason: str) -> None:
+        result = ClassificationResult(
+            label="simple",
+            confidence=0.9,
+            source="learned_downgrade",
+            detail=reason,
+        )
+        self._downgrades[key] = result
+        self._downgrades.move_to_end(key)
+        while len(self._downgrades) > self._max_size:
+            self._downgrades.popitem(last=False)
+        self._upgrades.pop(key, None)
+        logger.info("[Learned] downgraded '%s' -> simple (reason: %s)", key[:40], reason)
+
+    def clear(self) -> None:
+        self._upgrades.clear()
+        self._downgrades.clear()
+
+    @property
+    def size(self) -> int:
+        return len(self._upgrades) + len(self._downgrades)
+
+
+class _ClassifierCache:
+    _instance: _ClassifierCache | None = None
+
+    def __new__(cls) -> _ClassifierCache:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._cache: OrderedDict[str, ClassificationResult] = OrderedDict()
@@ -45,6 +111,37 @@ class ClassifierCache:
         self._cache.clear()
 
 
+class _AdaptiveBudget:
+    """Runtime budget thresholds for auto-upgrade/downgrade decisions."""
+
+    MAX_SIMPLE_ITERATIONS: int = 10
+    MAX_SIMPLE_TOOL_CALLS: int = 4
+    MAX_SIMPLE_TIME_SEC: float = 30.0
+    MAX_COMPLEX_STEPS: int = 5
+    MIN_COMPLEX_STEPS: int = 2
+
+    @classmethod
+    def exceeded_simple_budget(cls, iterations: int, tool_calls: int, elapsed: float) -> bool:
+        return (
+            iterations >= cls.MAX_SIMPLE_ITERATIONS
+            or tool_calls >= cls.MAX_SIMPLE_TOOL_CALLS
+            or elapsed >= cls.MAX_SIMPLE_TIME_SEC
+        )
+
+    @classmethod
+    def can_downgrade_complex(cls, steps_executed: int, elapsed: float) -> bool:
+        return steps_executed <= 1 and elapsed <= 10.0
+
+
+_LEARNED = _LearnedClassifications()
+_CACHE = _ClassifierCache()
+_BUDGET = _AdaptiveBudget()
+
+
+# ---------------------------------------------------------------------------
+# Keyword rules
+# ---------------------------------------------------------------------------
+
 _COMPLEX_RULES: list[tuple[str, int]] = [
     ("plan", 3), ("step by step", 3), ("分步", 3), ("步骤", 3),
     ("analyze", 3), ("分析", 3), ("compare", 3), ("对比", 3),
@@ -63,6 +160,10 @@ _COMPLEX_RULES: list[tuple[str, int]] = [
     ("database", 3), ("sql", 3),
     ("实现", 2), ("编写", 2),
     ("排查", 2), ("定位", 2),
+    ("improve", 2), ("优化", 2), ("refactor", 2),
+    ("integrate", 2), ("集成", 2), ("connect", 2), ("对接", 2),
+    ("troubleshoot", 3), ("issue", 2), ("problem", 2),
+    ("recommend", 2), ("suggest", 2), ("建议", 2), ("推荐", 2),
 ]
 
 _SIMPLE_RULES: list[tuple[str, int]] = [
@@ -78,8 +179,56 @@ _SIMPLE_RULES: list[tuple[str, int]] = [
     ("阅读", 1), ("看看", 1), ("读取", 1),
     ("你好", 1), ("hello", 1), ("hi", 1),
     ("多少", 1), ("几", 1),
+    ("是谁", 2), ("哪里", 1), ("哪个", 1),
+    ("介绍一下", 2), ("帮我看看", 1), ("帮我查", 1),
+    ("简单", 1), ("直接", 1),
 ]
 
+
+# ---------------------------------------------------------------------------
+# Query length / structure heuristics
+# ---------------------------------------------------------------------------
+
+def _length_heuristic(text: str) -> ClassificationResult | None:
+    """Short queries with no action verbs are almost always simple."""
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    total_chars = len(text.replace(" ", ""))
+
+    if total_chars <= 6 and chinese_chars <= 4:
+        return ClassificationResult(
+            label="simple",
+            confidence=0.8,
+            source="heuristic_short",
+            detail=f"len={total_chars}",
+        )
+    return None
+
+
+def _multi_signal_detection(text: str) -> ClassificationResult | None:
+    """Detect queries that imply multiple actions without explicit keywords.
+
+    E.g. "help me search the web and then summarize" — no complex keyword,
+    but "and then" signals multi-step intent.
+    """
+    multi_step_markers = [
+        "然后", "之后", "接着", "再", "并且", "同时",
+        " and ", " then ", " after that ", "next,",
+        "first", "先", "subsequently",
+    ]
+    count = sum(1 for m in multi_step_markers if m in text)
+    if count >= 2:
+        return ClassificationResult(
+            label="complex",
+            confidence=0.7,
+            source="heuristic_multi",
+            detail=f"multi_step_markers={count}",
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Core classification logic
+# ---------------------------------------------------------------------------
 
 def _keyword_score(text: str, rules: list[tuple[str, int]]) -> tuple[int, list[str]]:
     score = 0
@@ -136,10 +285,9 @@ def _classify_via_keywords(text: str) -> ClassificationResult | None:
         )
 
     if complex_score > 0 and simple_score > 0:
-        conf = 0.5
         return ClassificationResult(
             label="complex",
-            confidence=conf,
+            confidence=0.5,
             source="keyword_tie",
             detail=f"tie complex[{complex_score}] vs simple[{simple_score}]",
         )
@@ -187,20 +335,52 @@ Reply with exactly one word: simple or complex."""
         )
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def classify_query(llm: Any, user_input: str) -> str:
-    cache = ClassifierCache()
+    """Classify query complexity with three-tier adaptive strategy.
+
+    Tier 1: Learned corrections (feedback from past runs)
+    Tier 2: Keyword + heuristic scoring
+    Tier 3: LLM classification (fallback)
+    """
     key = _cache_key(user_input)
 
-    cached = cache.get(key)
+    learned = _LEARNED.get(key)
+    if learned is not None:
+        logger.info("[Classifier] learned: %s (src=%s)", learned.label, learned.source)
+        return learned.label
+
+    cached = _CACHE.get(key)
     if cached is not None:
         logger.debug("[Classifier] cache hit: %s (conf=%.2f)", cached.label, cached.confidence)
         return cached.label
 
     text = user_input.strip().lower()
 
+    heuristic_result = _length_heuristic(text)
+    if heuristic_result is not None:
+        _CACHE.put(key, heuristic_result)
+        logger.info(
+            "[Classifier] heuristic: %s conf=%.2f (%s)",
+            heuristic_result.label, heuristic_result.confidence, heuristic_result.detail,
+        )
+        return heuristic_result.label
+
+    multi_result = _multi_signal_detection(text)
+    if multi_result is not None:
+        _CACHE.put(key, multi_result)
+        logger.info(
+            "[Classifier] multi-signal: %s conf=%.2f",
+            multi_result.label, multi_result.confidence,
+        )
+        return multi_result.label
+
     kw_result = _classify_via_keywords(text)
     if kw_result is not None and kw_result.confidence >= 0.5:
-        cache.put(key, kw_result)
+        _CACHE.put(key, kw_result)
         logger.info(
             "[Classifier] keyword: %s conf=%.2f hits=%s",
             kw_result.label, kw_result.confidence, kw_result.detail,
@@ -208,5 +388,78 @@ def classify_query(llm: Any, user_input: str) -> str:
         return kw_result.label
 
     llm_result = _classify_via_llm(llm, user_input)
-    cache.put(key, llm_result)
+    _CACHE.put(key, llm_result)
     return llm_result.label
+
+
+def record_feedback(
+    user_input: str,
+    original_label: str,
+    iterations: int = 0,
+    tool_calls: int = 0,
+    elapsed: float = 0.0,
+    steps_executed: int = 0,
+) -> str | None:
+    """Report runtime execution metrics to learn better classifications.
+
+    Returns the new label if reclassified, or None if no change needed.
+    """
+    key = _cache_key(user_input)
+    changed = False
+    new_label: str | None = None
+
+    if original_label == "simple" and _BUDGET.exceeded_simple_budget(iterations, tool_calls, elapsed):
+        reason = f"budget_exceeded: iter={iterations} tools={tool_calls} time={elapsed:.1f}s"
+        _LEARNED.record_upgrade(key, reason)
+        _CACHE.put(key, ClassificationResult(
+            label="complex", confidence=0.9, source="learned_upgrade", detail=reason,
+        ))
+        new_label = "complex"
+        changed = True
+
+    elif original_label == "complex" and _BUDGET.can_downgrade_complex(steps_executed, elapsed):
+        reason = f"under_budget: steps={steps_executed} time={elapsed:.1f}s"
+        _LEARNED.record_downgrade(key, reason)
+        _CACHE.put(key, ClassificationResult(
+            label="simple", confidence=0.9, source="learned_downgrade", detail=reason,
+        ))
+        new_label = "simple"
+        changed = True
+
+    if changed:
+        logger.info(
+            "[Classifier] feedback: %s -> %s (orig=%s, iter=%d, tools=%d, time=%.1fs, steps=%d)",
+            user_input[:40], new_label, original_label, iterations, tool_calls, elapsed, steps_executed,
+        )
+        return new_label
+
+    return None
+
+
+def get_budget() -> _AdaptiveBudget:
+    """Get current adaptive budget thresholds for tuning."""
+    return _BUDGET
+
+
+def set_budget(
+    max_simple_iterations: int | None = None,
+    max_simple_tool_calls: int | None = None,
+    max_simple_time_sec: float | None = None,
+    min_complex_steps: int | None = None,
+) -> None:
+    """Override adaptive budget thresholds at runtime."""
+    if max_simple_iterations is not None:
+        _BUDGET.MAX_SIMPLE_ITERATIONS = max_simple_iterations
+    if max_simple_tool_calls is not None:
+        _BUDGET.MAX_SIMPLE_TOOL_CALLS = max_simple_tool_calls
+    if max_simple_time_sec is not None:
+        _BUDGET.MAX_SIMPLE_TIME_SEC = max_simple_time_sec
+    if min_complex_steps is not None:
+        _BUDGET.MIN_COMPLEX_STEPS = min_complex_steps
+
+
+def clear_classifier() -> None:
+    """Clear all caches and learned classifications."""
+    _CACHE.clear()
+    _LEARNED.clear()
+    logger.info("[Classifier] All caches cleared.")

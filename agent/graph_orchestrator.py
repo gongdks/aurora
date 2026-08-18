@@ -2,17 +2,25 @@
 
 Architecture:
 
-  ┌──────────┐    ┌──────────────┐    ┌──────────┐
-  │ classify  │───→│ react_fast   │───→│   END    │
-  └────┬─────┘    └──────────────┘    └──────────┘
-       │ complex
-       ▼
-  ┌──────────┐    ┌──────────────┐    ┌──────────┐
-  │   plan    │───→│ execute_step │───→│  verify  │
-  └──────────┘    └──────┬───────┘    └────┬─────┘
-                          │ more steps       │ not complete
+  ┌──────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+  │ classify  │───→│ react_fast   │───→│ adaptive_chk │───→│   END    │
+  └────┬─────┘    └──────────────┘    └──────┬───────┘    └──────────┘
+       │ complex                              │ budget exceeded
+       ▼                                      ▼
+  ┌──────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+  │   plan    │───→│ execute_step │───→│  verify      │───→│   END    │
+  └──────────┘    └──────┬───────┘    └──────┬───────┘    └──────────┘
+                          │ more steps        │ not complete
                           ▼                 ▼
-                     check_steps       re-plan → plan
+                     check_steps         re-plan → plan
+
+Adaptive features:
+  - Tier 1: Learned classifications (feedback from past runs)
+  - Tier 2: Keyword + heuristic scoring
+  - Tier 3: LLM classification (fallback)
+  - Runtime: Budget monitoring auto-upgrades/downgrades paths
+    * Simple path exceeding iterations/tool_calls/time → auto-upgrade to complex
+    * Complex path finishing in <=1 step and <10s → learned as simple
 
 Pure LangGraph provides: declarative routing, checkpointing,
 debug visualization, and typed state management.
@@ -25,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, TypedDict
 
@@ -57,6 +66,13 @@ class AgentState(TypedDict, total=False):
     result: str
     is_done: bool
     plan_rounds: int
+    graph_start_time: float
+    fast_iterations: int
+    fast_tool_calls: int
+    fast_elapsed: float
+    fast_hit_limit: bool
+    complex_steps_executed: int
+    complex_elapsed: float
 
 
 class GraphOrchestrator:
@@ -101,6 +117,7 @@ class GraphOrchestrator:
 
         graph.add_node("classify", self._node_classify)
         graph.add_node("react_fast", self._node_react_fast)
+        graph.add_node("adaptive_check", self._node_adaptive_check)
         graph.add_node("plan", self._node_plan)
         graph.add_node("execute_step", self._node_execute_step)
         graph.add_node("check_steps", self._node_check_steps)
@@ -118,7 +135,16 @@ class GraphOrchestrator:
             },
         )
 
-        graph.add_edge("react_fast", END)
+        graph.add_edge("react_fast", "adaptive_check")
+
+        graph.add_conditional_edges(
+            "adaptive_check",
+            self._route_after_adaptive,
+            {
+                "end": END,
+                "upgrade": "plan",
+            },
+        )
 
         graph.add_edge("plan", "execute_step")
 
@@ -171,6 +197,13 @@ class GraphOrchestrator:
             "result": "",
             "is_done": False,
             "plan_rounds": 0,
+            "graph_start_time": time.time(),
+            "fast_iterations": 0,
+            "fast_tool_calls": 0,
+            "fast_elapsed": 0.0,
+            "fast_hit_limit": False,
+            "complex_steps_executed": 0,
+            "complex_elapsed": 0.0,
         }
 
         try:
@@ -180,6 +213,8 @@ class GraphOrchestrator:
             if progress_callback:
                 progress_callback(make_log(f"❌ Graph error: {exc}"))
             return f"Error: {exc}"
+
+        self._record_complex_downgrade_feedback(final_state)
 
         return final_state.get("result", "已完成，但未产生文本输出。")
 
@@ -221,8 +256,12 @@ class GraphOrchestrator:
         self,
         input_text: str,
         chat_history_messages: list,
-    ) -> str:
-        """Run a single ReAct tool-calling step with cancellation support."""
+    ) -> dict[str, Any]:
+        """Run a single ReAct tool-calling step with cancellation support.
+
+        Returns dict with: result, status, iterations, time, hit_limit,
+        tool_calls (count from tracker), llm_calls (count from tracker).
+        """
         tracker = _BaseToolEventTracker(self._progress_cb)
         streaming_handler = StreamingCallbackHandler(self._progress_cb)
 
@@ -237,12 +276,45 @@ class GraphOrchestrator:
         )
 
         if self._cancel_event.is_set():
-            return "⏹ 已停止"
-        if result["status"] == "completed":
-            return result["result"]
-        if result["status"] == "cancelled":
-            return "⏹ 已停止"
-        return f"[Error] {result.get('error', 'Execution failed')}"
+            return {
+                "result": "⏹ 已停止",
+                "status": "cancelled",
+                "iterations": 0,
+                "time": 0.0,
+                "hit_limit": False,
+                "tool_calls": 0,
+                "llm_calls": 0,
+            }
+
+        enriched = dict(result)
+        enriched["tool_calls"] = tracker._call_counter
+        enriched["llm_calls"] = tracker._llm_call_count
+        return enriched
+
+    def _record_complex_downgrade_feedback(self, final_state: AgentState) -> None:
+        """After graph completion: learn if complex queries could have been simple.
+
+        If a query was classified as "complex" but finished in <=1 plan step
+        and under 10 seconds, it would have been better handled by the simple
+        path. Record this feedback so the classifier learns for next time.
+        """
+        from agent.utils.classifier import record_feedback
+
+        classification = final_state.get("classification", "")
+        if classification != "complex":
+            return
+
+        graph_start = final_state.get("graph_start_time", time.time())
+        total_elapsed = time.time() - graph_start
+        steps_executed = final_state.get("complex_steps_executed", 0)
+
+        user_input = final_state.get("user_input", "")
+        record_feedback(
+            user_input=user_input,
+            original_label="complex",
+            steps_executed=steps_executed,
+            elapsed=total_elapsed,
+        )
 
     # ------------------------------------------------------------------
     # Node implementations
@@ -255,30 +327,105 @@ class GraphOrchestrator:
         if self._cancel_event and self._cancel_event.is_set():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        if self._progress_cb:
-            self._progress_cb(make_log("🤔 **Analyzing query complexity...**"))
+        # if self._progress_cb:
+        #     self._progress_cb(make_log("🤔 **Analyzing query complexity...**"))
 
         classification = classify_query(self._llm, state["user_input"])
 
-        if self._progress_cb:
-            self._progress_cb(make_log(f"⚡ **Route: {classification}**"))
+        # if self._progress_cb:
+        #     self._progress_cb(make_log(f"⚡ **Route: {classification}**"))
 
         return {"classification": classification}
 
     def _node_react_fast(self, state: AgentState) -> dict[str, Any]:
-        """Execute a simple query via the LangChain ReAct fast path."""
+        """Execute a simple query via the LangChain ReAct fast path with budget tracking."""
         if self._cancel_event and self._cancel_event.is_set():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        if self._progress_cb:
-            self._progress_cb(make_log("⚡ **Running fast ReAct path...**"))
+        # if self._progress_cb:
+        #     self._progress_cb(make_log("⚡ **Running fast ReAct path...**"))
 
-        result = self._execute_step_with_tools(
+        exec_result = self._execute_step_with_tools(
             state["user_input"],
             state.get("chat_history_messages", []),
         )
 
-        return {"result": result, "is_done": True}
+        result_text = exec_result.get("result", "")
+        if exec_result.get("status") == "cancelled":
+            result_text = "⏹ 已停止"
+
+        return {
+            "result": result_text,
+            "is_done": True,
+            "fast_iterations": exec_result.get("iterations", 0),
+            "fast_tool_calls": exec_result.get("tool_calls", 0),
+            "fast_elapsed": exec_result.get("time", 0.0),
+            "fast_hit_limit": exec_result.get("hit_limit", False),
+        }
+
+    def _node_adaptive_check(self, state: AgentState) -> dict[str, Any]:
+        """After fast path: check if budget was exceeded and upgrade to complex if needed.
+
+        This is the core of the adaptive routing. If a query was classified
+        as "simple" but actually used too many iterations, tool calls, or
+        time, we reclassify it as "complex" and route to the plan+execute
+        path. The feedback is recorded so future identical queries will
+        be correctly classified from the start.
+        """
+        from agent.utils.classifier import record_feedback, get_budget
+
+        if self._cancel_event and self._cancel_event.is_set():
+            return {"result": "⏹ 已停止", "is_done": True}
+
+        classification = state.get("classification", "simple")
+        iterations = state.get("fast_iterations", 0)
+        tool_calls = state.get("fast_tool_calls", 0)
+        elapsed = state.get("fast_elapsed", 0.0)
+        hit_limit = state.get("fast_hit_limit", False)
+
+        if classification != "simple":
+            return {}
+
+        budget = get_budget()
+        exceeded = budget.exceeded_simple_budget(iterations, tool_calls, elapsed)
+
+        if hit_limit or exceeded:
+            if self._progress_cb:
+                reason_parts = []
+                if hit_limit:
+                    reason_parts.append("hit iteration/time limit")
+                if iterations >= budget.MAX_SIMPLE_ITERATIONS:
+                    reason_parts.append(f"iter={iterations}>={budget.MAX_SIMPLE_ITERATIONS}")
+                if tool_calls >= budget.MAX_SIMPLE_TOOL_CALLS:
+                    reason_parts.append(f"tools={tool_calls}>={budget.MAX_SIMPLE_TOOL_CALLS}")
+                if elapsed >= budget.MAX_SIMPLE_TIME_SEC:
+                    reason_parts.append(f"time={elapsed:.1f}s>={budget.MAX_SIMPLE_TIME_SEC}s")
+                reason = ", ".join(reason_parts) if reason_parts else "budget exceeded"
+                self._progress_cb(make_log(
+                    f"⚠️ **Fast path budget exceeded** ({reason}) → upgrading to complex path"
+                ))
+
+            user_input = state.get("user_input", "")
+            record_feedback(
+                user_input=user_input,
+                original_label="simple",
+                iterations=iterations,
+                tool_calls=tool_calls,
+                elapsed=elapsed,
+            )
+
+            return {
+                "classification": "complex",
+                "result": state.get("result", ""),
+                "is_done": False,
+            }
+
+        logger.info(
+            "[Adaptive] Fast path OK: iter=%d tools=%d time=%.1fss (budget: max_iter=%d max_tools=%d max_time=%.1fs)",
+            iterations, tool_calls, elapsed,
+            budget.MAX_SIMPLE_ITERATIONS, budget.MAX_SIMPLE_TOOL_CALLS, budget.MAX_SIMPLE_TIME_SEC,
+        )
+        return {}
 
     def _node_plan(self, state: AgentState) -> dict[str, Any]:
         """Create a step-by-step execution plan via LLM."""
@@ -399,19 +546,24 @@ After completing this step, provide a brief summary of what you did and what you
 
         result = self._execute_step_with_tools(step_prompt, chat_history)
 
+        result_text = result.get("result", "") if isinstance(result, dict) else str(result)
+
         results = list(state.get("results", []))
         while len(results) <= current_step:
             results.append("")
-        results[current_step] = result
+        results[current_step] = result_text
+
+        complex_steps = state.get("complex_steps_executed", 0) + 1
 
         if self._progress_cb:
             self._progress_cb(
-                make_log(f"✅ Step {current_step + 1} completed: {result[:200]}")
+                make_log(f"✅ Step {current_step + 1} completed: {result_text[:200]}")
             )
 
         return {
             "results": results,
             "current_step": current_step + 1,
+            "complex_steps_executed": complex_steps,
         }
 
     def _node_check_steps(self, state: AgentState) -> dict[str, Any]:
@@ -665,6 +817,13 @@ Respond with numbered steps only."""
     @staticmethod
     def _route_after_classify(state: AgentState) -> str:
         return state.get("classification", "complex")
+
+    @staticmethod
+    def _route_after_adaptive(state: AgentState) -> str:
+        """After adaptive check: either end (fast path OK) or upgrade to complex."""
+        if state.get("classification") == "complex":
+            return "upgrade"
+        return "end"
 
     @staticmethod
     def _route_after_check(state: AgentState) -> str:
