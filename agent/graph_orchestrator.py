@@ -255,20 +255,7 @@ class GraphOrchestrator:
         if self._cancel_event and self._cancel_event.is_set():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        if self._progress_cb:
-            self._progress_cb(make_log("🤔 **Analyzing query complexity...**"))
-
         classification = classify_query(self._llm, state["user_input"])
-
-        if self._progress_cb:
-            icon = "⚡" if classification == "simple" else "🧩"
-            self._progress_cb(
-                make_log(
-                    f"{icon} **Route: {classification}** — "
-                    f"{'fast path' if classification == 'simple' else 'multi-step Plan-and-Execute'}"
-                )
-            )
-            self._progress_cb(make_streaming_token(f" → {classification}"))
 
         return {"classification": classification}
 

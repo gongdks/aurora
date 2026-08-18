@@ -14,22 +14,21 @@ def _escape(text: str) -> str:
 
 
 def user_message_html(text: str) -> str:
-    """Render a user message bubble."""
+    """Render a user message bubble (right side)."""
     escaped = _escape(text)
     return f"""
-    <div style="margin: 8px 0; text-align: right;">
-        <div style="display: inline-block; background-color: {COLORS['user_bubble']};
-             border: 1px solid {COLORS['border']}; border-radius: 12px;
-             padding: 10px 16px; max-width: 80%; text-align: left;">
-            <div style="color: {COLORS['text']};">{escaped}</div>
-        </div>
-    </div>"""
+    <table align="right" cellspacing="0" cellpadding="0" style="margin: 8px 0;">
+    <tr><td style="background-color: {COLORS['user_bubble']};
+         border: 1px solid {COLORS['border']}; border-radius: 12px;
+         padding: 10px 16px;">
+        <div style="color: {COLORS['text']}; text-align: left;">{escaped}</div>
+    </td></tr></table>"""
 
 
 def assistant_header_html() -> str:
-    """Render the assistant message header."""
+    """Render the assistant message header (left side)."""
     return f"""
-    <div style="margin: 12px 0 4px 0; display: flex; align-items: center; gap: 8px;">
+    <div style="margin: 12px 0 4px 0; display: flex; align-items: center; gap: 8px; text-align: left;">
         <span style="font-size: 16px;">🤖</span>
         <span style="font-weight: 600; font-size: 13px; color: {COLORS['text_secondary']};">AI Agent</span>
     </div>"""
@@ -86,14 +85,14 @@ def cancelled_html() -> str:
 
 
 def final_answer_html(answer: str, elapsed: float, tool_count: int) -> str:
-    """Render the final answer with metadata."""
+    """Render the final answer with metadata (left side)."""
     escaped = _escape(answer)
     sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
     return f"""
-    <div style="margin: 12px 0;">
-        <div style="background-color: {COLORS['assistant_bubble']};
+    <div style="margin: 12px 0; text-align: left;">
+        <div style="display: inline-block; background-color: {COLORS['assistant_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 12px;
-             padding: 14px 18px; line-height: 1.7;">
+             padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">
             <div style="color: {COLORS['text']}; font-size: 14px; white-space: pre-wrap;">{escaped}</div>
         </div>
         <div style="margin-top: 6px; display: flex; gap: 16px; font-size: 11px; color: {COLORS['muted']};">
@@ -143,7 +142,7 @@ def event_to_html(event: dict[str, Any]) -> str:
     if event_type == "done":
         answer = event.get("answer", "")
         return assistant_header_html() + f"""
-        <div style="margin: 8px 0;">
+        <div style="margin: 8px 0; text-align: left;">
             <div style="color: {COLORS['text']}; font-size: 14px; white-space: pre-wrap;">
                 {_escape(answer[:2000])}
             </div>
