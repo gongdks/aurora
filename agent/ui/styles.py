@@ -28,7 +28,7 @@ QMainWindow, QWidget {
 }
 
 QFrame#Header {
-    background-color: %(surface)s;
+    background-color: transparent;
     border-bottom: 1px solid %(border)s;
 }
 
