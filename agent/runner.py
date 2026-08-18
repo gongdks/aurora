@@ -148,7 +148,9 @@ def build_react_executor(
         配置好的 AgentExecutor
     """
     tools = list_tools()
-    agent = create_tool_calling_agent(llm, tools, AGENT_PROMPT)
+    tool_names = ", ".join(t.name for t in tools)
+    prompt = AGENT_PROMPT.partial(tool_names=tool_names)
+    agent = create_tool_calling_agent(llm, tools, prompt)
 
     return AgentExecutor(
         agent=agent,

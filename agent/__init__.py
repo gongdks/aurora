@@ -1,15 +1,15 @@
-"""AI Agent package — LangGraph + AutoGen hybrid multi-agent agent.
+"""AI Agent package — pure LangGraph Plan-and-Execute agent.
 
 Layers:
     llm/                — Chat model (remote API / local Ollama, switch via .env)
-    memory/             — Short-term conversation sliding window
+    memory/             — Short-term sliding window + long-term SQLite storage
     tools/              — Tool ecosystem (calculator, search, file R/W, code exec, etc.)
-    agent.py            — AgentSession core (mode switcher: "graph" / "autogen")
-    graph_orchestrator.py — LangGraph + AutoGen hybrid orchestrator (recommended)
-    orchestrator.py     — AutoGen GroupChat orchestrator (legacy, still available)
-    executor.py         — Single-step ReAct executor (for simple queries)
+    ui/                 — PyQt6 desktop GUI components
+    agent.py            — AgentSession core (pure LangGraph orchestration)
+    graph_orchestrator.py — LangGraph Plan-and-Execute orchestrator
+    runner.py           — Shared ReAct executor (tool-calling, streaming, tracking)
     prompts.py          — Tool-calling agent prompt template
     config.py           — Unified config (.env → Settings)
 """
 
-__version__ = "5.0.0"
+__version__ = "6.0.0"

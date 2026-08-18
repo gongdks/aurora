@@ -1,53 +1,85 @@
-"""Query classifier — determines if a user request is 'simple' or 'complex'."""
+"""Query classifier — determines if a query is simple or complex."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from agent.utils.retry import llm_invoke_with_guard
-
 logger = logging.getLogger(__name__)
-
-_QUERY_CLASSIFIER_PROMPT = """Classify this user request. Reply with exactly one word: "simple" or "complex".
-
-Rules:
-- "simple": a single-step task — math, factual lookup, translation, brief Q&A, read a file, simple web search.
-- "complex": anything requiring multiple steps, planning, chaining tools (e.g. "search X then summarize Y"), analyzing and then acting, or involving conditional logic.
-
-Request: {user_input}
-
-Classification (simple/complex):"""
-
-_CLASSIFIER_TIMEOUT = 5.0
-_CLASSIFIER_MAX_RETRIES = 1
 
 
 def classify_query(llm: Any, user_input: str) -> str:
-    """Use the LLM to classify a query as 'simple' or 'complex'.
+    """Classify a query as 'simple' or 'complex'.
+
+    Simple: questions that can be answered in one ReAct loop
+        (single tool call or just LLM knowledge).
+    Complex: multi-step tasks requiring planning, multiple tool
+        calls, or verification.
 
     Args:
-        llm: LangChain BaseChatModel instance.
-        user_input: The user's raw message.
+        llm: LangChain chat model instance.
+        user_input: The user's query text.
 
     Returns:
-        "simple" or "complex". Falls back to "complex" on any error
-        (over-planning is safer than silently skipping steps).
+        "simple" or "complex".
     """
-    prompt = _QUERY_CLASSIFIER_PROMPT.format(user_input=user_input)
+    text = user_input.strip().lower()
+
+    # Quick keyword heuristics for common patterns
+    complex_keywords = [
+        "plan", "step by step", "step-by-step", "分步", "步骤",
+        "analyze", "分析", "compare", "对比", "evaluate",
+        "research", "研究", "investigate", "查资料",
+        "build", "create", "制作", "创建", "develop", "开发",
+        "debug", "fix", "修复", "troubleshoot",
+        "summarize", "总结", "compile", "汇总",
+        "download", "下载", "scrape", "crawl", "爬虫",
+        "organize", "整理", "structure", "结构化",
+        "transform", "convert", "转换",
+        "automate", "自动", "workflow", "流程",
+        "deploy", "部署", "install", "安装",
+        "monitor", "监控", "test", "测试",
+        "write code", "写代码", "generate code",
+        "api", "rest", "endpoint", "服务", "接口",
+        "database", "sql", "query",
+    ]
+
+    simple_keywords = [
+        "what is", "who is", "define", "meaning of",
+        "how does", "explain", "translate", "翻译",
+        "calculate", "compute", "count",
+        "search for", "find", "look up", "查找", "搜索",
+        "read file", "open file", "show", "display",
+        "tell me", "give me", "list",
+        "yes/no", "true/false",
+    ]
+
+    for kw in complex_keywords:
+        if kw in text:
+            return "complex"
+
+    for kw in simple_keywords:
+        if kw in text:
+            return "simple"
+
+    # Use LLM for ambiguous cases
     try:
-        response = llm_invoke_with_guard(
-            llm, [{"role": "user", "content": prompt}],
-            timeout=_CLASSIFIER_TIMEOUT,
-            max_retries=_CLASSIFIER_MAX_RETRIES,
-        )
-        result = response.content.strip().lower()
-        first_word = result.split("\n")[0].strip().split()[0] if result else ""
-        if first_word in ("simple", "complex"):
-            return first_word
-        if "simple" in result and "complex" not in result:
+        prompt = f"""Classify this user query as 'simple' or 'complex'.
+
+Simple = can be answered with a single tool call or direct knowledge.
+Complex = requires multiple steps, planning, or verification.
+
+Query: "{user_input}"
+
+Respond with exactly one word: simple or complex."""
+
+        response = llm.invoke(prompt)
+        answer = response.content.strip().lower()
+
+        if "simple" in answer:
             return "simple"
         return "complex"
+
     except Exception:
-        logger.warning("Query classifier failed, defaulting to complex path")
+        logger.warning("LLM classification failed, defaulting to 'complex'")
         return "complex"

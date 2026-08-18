@@ -1,14 +1,14 @@
 [project]
 name = "ai-agent"
-version = "4.0.0"
-description = "Practical Plan-and-Execute AI Agent — AutoGen multi-agent, tool-calling, PyQt6 Desktop UI & FastAPI"
+version = "6.0.0"
+description = "Practical Plan-and-Execute AI Agent — LangGraph orchestration, PyQt6 Desktop GUI"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
     { name = "AI Agent Team" },
 ]
-keywords = ["ai-agent", "langchain", "react", "tool-calling", "llm"]
+keywords = ["ai-agent", "langchain", "react", "tool-calling", "llm", "langgraph"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -25,15 +25,12 @@ dependencies = [
     "langchain-openai>=0.3.0",
     "langchain-ollama>=0.3.0",
     "langgraph>=0.2.0",
+    "PyQt6>=6.6.0",
     "duckduckgo-search>=6.0.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
-
     "python-dotenv>=1.0.0",
     "pydantic-settings>=2.0.0",
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "ag2>=0.8.0,<1.0.0",
 ]
 
 [project.optional-dependencies]

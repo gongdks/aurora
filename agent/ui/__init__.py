@@ -1,0 +1,1 @@
+"""Agent UI layer — PyQt6 rendering and worker components."""
