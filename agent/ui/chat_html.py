@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from agent.ui.markdown_renderer import render_markdown
 from agent.ui.styles import COLORS
 
 
@@ -35,32 +36,37 @@ def assistant_header_html() -> str:
 
 
 def tool_html(name: str, input_str: str, output: str | None = None) -> str:
-    """Render a tool call block."""
+    """Render a tool call block (compact, always-visible for QTextBrowser)."""
     escaped_name = _escape(name)
     escaped_input = _escape(input_str[:200])
     escaped_output = _escape((output or "")[:500])
+    input_truncated = len(input_str) > 200
+    output_truncated = (len(output or "") > 500) if output else False
 
     if output:
+        input_line = escaped_input + ("..." if input_truncated else "")
+        output_line = escaped_output + ("..." if output_truncated else "")
         return f"""
-        <div style="margin: 6px 0; background-color: {COLORS['tool_bubble']};
+        <div class="tool-block" style="margin: 6px 0; background-color: {COLORS['tool_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px 14px;">
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
                 <span style="color: {COLORS['accent']}; font-weight: 600; font-size: 12px;">🔧 {escaped_name}</span>
             </div>
             <div style="color: {COLORS['text_secondary']}; font-size: 12px; margin-bottom: 4px;">
-                <span style="color: {COLORS['muted']};">Input:</span> {escaped_input}
+                <span style="color: {COLORS['muted']};">Input:</span> {input_line}
             </div>
             <div style="color: {COLORS['green']}; font-size: 12px; font-family: Consolas, Monaco, monospace;">
-                {escaped_output}
+                {output_line}
             </div>
         </div>"""
     else:
+        short = escaped_input[:100] + ("..." if len(input_str) > 100 else "")
         return f"""
-        <div style="margin: 6px 0; background-color: {COLORS['tool_bubble']};
+        <div class="tool-block" style="margin: 6px 0; background-color: {COLORS['tool_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px 14px;">
             <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="color: {COLORS['accent']}; font-weight: 600; font-size: 12px;">🔧 {escaped_name}</span>
-                <span style="color: {COLORS['muted']}; font-size: 11px;">{escaped_input[:100]}</span>
+                <span style="color: {COLORS['muted']}; font-size: 11px;">{short}</span>
             </div>
         </div>"""
 
@@ -85,19 +91,21 @@ def cancelled_html() -> str:
 
 
 def final_answer_html(answer: str, elapsed: float, tool_count: int) -> str:
-    """Render the final answer with metadata (left side)."""
-    escaped = _escape(answer)
+    """Render the final answer with metadata (left side) — with Markdown support."""
+    rendered = render_markdown(answer)
     sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
     return f"""
     <div style="margin: 12px 0; text-align: left;">
         <div style="display: inline-block; background-color: {COLORS['assistant_bubble']};
              border: 1px solid {COLORS['border']}; border-radius: 12px;
              padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">
-            <div style="color: {COLORS['text']}; font-size: 14px; white-space: pre-wrap;">{escaped}</div>
+            <div class="md-body" style="color: {COLORS['text']}; font-size: 14px;">
+                {rendered}
+            </div>
         </div>
         <div style="margin-top: 6px; display: flex; gap: 16px; font-size: 11px; color: {COLORS['muted']};">
             <span>⏱ {sec}</span>
-            <span>🔧 {tool_count} tool calls</span>
+            <span>🔧 {tool_count} 次工具调用</span>
         </div>
     </div>"""
 
@@ -141,15 +149,16 @@ def event_to_html(event: dict[str, Any]) -> str:
 
     if event_type == "done":
         answer = event.get("answer", "")
+        rendered = render_markdown(answer[:2000])
         return assistant_header_html() + f"""
         <div style="margin: 8px 0; text-align: left;">
-            <div style="color: {COLORS['text']}; font-size: 14px; white-space: pre-wrap;">
-                {_escape(answer[:2000])}
+            <div class="md-body" style="color: {COLORS['text']}; font-size: 14px;">
+                {rendered}
             </div>
         </div>"""
 
     if event_type == "streaming_token":
         token = event.get("token", "")
-        return f'<span style="color: {COLORS["text"]};">{_escape(token)}</span>'
+        return f'<span class="streaming-token" style="color: {COLORS["text"]};">{_escape(token)}</span>'
 
     return ""

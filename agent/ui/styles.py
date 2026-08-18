@@ -91,9 +91,64 @@ QTextBrowser#ChatText {
 
 QTextBrowser#ChatText a {
     color: %(accent)s;
+    text-decoration: underline;
 }
 
-QTextBrowser#ChatText code {
+QTextBrowser#ChatText .md-body {
+    color: %(text)s;
+    line-height: 1.7;
+}
+
+QTextBrowser#ChatText .md-body h1,
+QTextBrowser#ChatText .md-body h2 {
+    font-size: 18px;
+    font-weight: 700;
+    margin: 12px 0 8px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid %(border)s;
+    color: %(text)s;
+}
+
+QTextBrowser#ChatText .md-body h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 10px 0 6px 0;
+    color: %(text)s;
+}
+
+QTextBrowser#ChatText .md-body h4,
+QTextBrowser#ChatText .md-body h5,
+QTextBrowser#ChatText .md-body h6 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 8px 0 4px 0;
+    color: %(text_secondary)s;
+}
+
+QTextBrowser#ChatText .md-body p {
+    margin: 6px 0;
+}
+
+QTextBrowser#ChatText .md-body ul,
+QTextBrowser#ChatText .md-body ol {
+    margin: 6px 0;
+    padding-left: 24px;
+}
+
+QTextBrowser#ChatText .md-body li {
+    margin: 3px 0;
+}
+
+QTextBrowser#ChatText .md-body blockquote {
+    margin: 8px 0;
+    padding: 6px 12px;
+    border-left: 3px solid %(accent)s;
+    background-color: %(surface2)s;
+    color: %(text_secondary)s;
+    border-radius: 0 6px 6px 0;
+}
+
+QTextBrowser#ChatText .md-body code {
     background-color: %(code_bg)s;
     color: #24292f;
     border-radius: 4px;
@@ -102,13 +157,78 @@ QTextBrowser#ChatText code {
     font-size: 13px;
 }
 
-QTextBrowser#ChatText pre {
+QTextBrowser#ChatText .md-body pre {
     background-color: %(code_bg)s;
     border: 1px solid %(border)s;
     border-radius: 8px;
     padding: 12px;
+    margin: 8px 0;
+    position: relative;
     font-family: "Consolas", "Monaco", monospace;
     font-size: 13px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+QTextBrowser#ChatText .md-body pre code {
+    background-color: transparent;
+    padding: 0;
+    border-radius: 0;
+    border: none;
+}
+
+QTextBrowser#ChatText .md-body table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    width: 100%%;
+}
+
+QTextBrowser#ChatText .md-body th {
+    background-color: %(surface2)s;
+    border: 1px solid %(border)s;
+    padding: 8px 12px;
+    font-weight: 600;
+    color: %(text)s;
+    text-align: left;
+}
+
+QTextBrowser#ChatText .md-body td {
+    border: 1px solid %(border)s;
+    padding: 6px 12px;
+}
+
+QTextBrowser#ChatText .md-body hr {
+    border: none;
+    border-top: 1px solid %(border)s;
+    margin: 12px 0;
+}
+
+QTextBrowser#ChatText .md-body strong {
+    font-weight: 700;
+    color: %(text)s;
+}
+
+QTextBrowser#ChatText .md-body em {
+    font-style: italic;
+}
+
+QTextBrowser#ChatText .md-body del {
+    color: %(muted)s;
+}
+
+QTextBrowser#ChatText .streaming-token {
+    background-color: rgba(74, 108, 247, 0.15);
+    border-radius: 3px;
+    padding: 0 2px;
+    animation: none;
+}
+
+QTextBrowser#ChatText::selection {
+    background-color: rgba(74, 108, 247, 0.3);
+}
+
+QTextBrowser#ChatText tool-block:hover {
+    background-color: %(surface2)s;
 }
 
 QFrame#InputContainer {

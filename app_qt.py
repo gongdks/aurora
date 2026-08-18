@@ -9,6 +9,7 @@ live in agent/ modules. This file only handles:
 
 from __future__ import annotations
 
+import html
 import logging
 import sys
 import threading
@@ -18,7 +19,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QCursor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QTextEdit, QVBoxLayout, QWidget, QTextBrowser,
 )
 
@@ -36,6 +37,7 @@ from agent.ui.chat_html import (
     tool_html,
     user_message_html,
 )
+from agent.ui.markdown_renderer import render_markdown
 from agent.ui.styles import COLORS, QSS
 from agent.ui.worker import AgentWorker
 from agent.ui.event_handler import DisplayState
@@ -72,6 +74,10 @@ class AIAgentWindow(QMainWindow):
         self._history: list[dict] = []
         self._is_running = False
         self._stop_requested = False
+        self._streaming_active = False
+        self._streaming_buffer = ""
+        self._stream_start_pos = 0
+        self._answer_rendered = False
 
         self._setup_ui()
         self._setup_connections()
@@ -232,6 +238,8 @@ class AIAgentWindow(QMainWindow):
         self._chat_text.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         self._chat_text.setReadOnly(True)
         self._chat_text.setVisible(False)
+        self._chat_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._chat_text.customContextMenuRequested.connect(self._show_context_menu)
         inner.addWidget(self._chat_text, 1)
 
         layout.addWidget(container, 1)
@@ -248,10 +256,11 @@ class AIAgentWindow(QMainWindow):
         self._input_box = QTextEdit()
         self._input_box.setObjectName("InputBox")
         self._input_box.setPlaceholderText("输入你的问题，Enter 发送，Shift+Enter 换行...")
-        self._input_box.setFixedHeight(44)
-        self._input_box.setMaximumHeight(120)
+        self._input_box.setMinimumHeight(44)
+        self._input_box.setMaximumHeight(150)
         self._input_box.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._input_box.setAcceptRichText(False)
+        self._input_box.textChanged.connect(self._adjust_input_height)
         input_layout.addWidget(self._input_box, 1)
 
         btn_layout = QHBoxLayout()
@@ -427,8 +436,65 @@ class AIAgentWindow(QMainWindow):
             self._welcome.setVisible(False)
             self._chat_text.setVisible(True)
 
-    def _append_html(self, html: str) -> None:
-        self._chat_text.append(html)
+    def _start_streaming(self) -> None:
+        self._streaming_active = True
+        self._streaming_buffer = ""
+        self._answer_rendered = False
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._stream_start_pos = cursor.position()
+        self._chat_text.setTextCursor(cursor)
+        self._chat_text.insertHtml(
+            f'<div style="margin: 12px 0; text-align: left;">'
+            f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+            f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+            f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+            f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px;">'
+        )
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._chat_text.setTextCursor(cursor)
+
+    def _append_streaming_token(self, token: str) -> None:
+        self._streaming_buffer += token
+        escaped = html.escape(token)
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._chat_text.setTextCursor(cursor)
+        self._chat_text.insertHtml(escaped)
+
+    def _end_streaming(self) -> None:
+        if not self._streaming_active:
+            return
+        self._streaming_active = False
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._chat_text.setTextCursor(cursor)
+        self._chat_text.insertHtml('</div></div></div>')
+        sb = self._chat_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _append_streaming_metadata(self) -> None:
+        elapsed = self._display.elapsed
+        tc = self._display.tool_count
+        sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
+        cursor = self._chat_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._chat_text.setTextCursor(cursor)
+        self._chat_text.insertHtml(
+            f'<div style="margin-top: 6px; display: flex; gap: 16px; '
+            f'font-size: 11px; color: {COLORS["muted"]};">'
+            f'<span>⏱ {sec}</span>'
+            f'<span>🔧 {tc} 次工具调用</span>'
+            f'</div>'
+        )
+        sb = self._chat_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _append_html(self, html_str: str) -> None:
+        if self._streaming_active:
+            self._end_streaming()
+        self._chat_text.append(html_str)
         sb = self._chat_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -465,20 +531,114 @@ class AIAgentWindow(QMainWindow):
         self._set_stat("步骤", "0", COLORS["text"])
         self._set_stat("状态", "●", COLORS["green"])
 
+    def _adjust_input_height(self) -> None:
+        doc = self._input_box.document()
+        h = int(doc.size().height()) + self._input_box.frameWidth() * 2 + 4
+        h = max(44, min(h, 150))
+        self._input_box.setFixedHeight(h)
+
+    def _show_context_menu(self, pos) -> None:
+        cursor = self._chat_text.textCursor()
+        cursor.setPosition(self._chat_text.textCursor().position())
+        has_selection = cursor.hasSelection()
+
+        menu = QMenu(self)
+
+        copy_action = QAction("复制", self)
+        copy_action.setEnabled(has_selection)
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.triggered.connect(lambda: self._chat_text.copy())
+        menu.addAction(copy_action)
+
+        select_all_action = QAction("全选", self)
+        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_all_action.triggered.connect(lambda: self._chat_text.selectAll())
+        menu.addAction(select_all_action)
+
+        menu.addSeparator()
+
+        copy_all_action = QAction("复制全部内容", self)
+        copy_all_action.triggered.connect(self._copy_all_content)
+        menu.addAction(copy_all_action)
+
+        menu.addSeparator()
+
+        clear_action = QAction("清空对话", self)
+        clear_action.triggered.connect(self._on_clear)
+        menu.addAction(clear_action)
+
+        menu.exec(self._chat_text.mapToGlobal(pos))
+
+    def _copy_all_content(self) -> None:
+        all_text = self._chat_text.toPlainText()
+        if all_text:
+            QApplication.clipboard().setText(all_text)
+
     # ------------------------------------------------------------------
     # Event → rendering dispatch (uses typed AgentEvent directly)
     # ------------------------------------------------------------------
 
-    def _render_event(self, event: AgentEvent) -> None:
-        """Render a typed AgentEvent into the chat display.
+    def _replace_streaming_with_answer(self, answer: str) -> None:
+        rendered = render_markdown(answer)
+        html_str = (
+            f'<div style="margin: 12px 0; text-align: left;">'
+            f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+            f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+            f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+            f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
+            f'{rendered}'
+            f'</div></div></div>'
+        )
+        cursor = self._chat_text.textCursor()
+        cursor.setPosition(self._stream_start_pos)
+        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertHtml(html_str)
+        self._answer_rendered = True
+        self._streaming_buffer = ""
+        sb = self._chat_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
-        Uses event_handler.DisplayState to keep stats consistent, and
-        chat_html.event_to_html for the actual HTML fragment.
-        """
+    def _render_event(self, event: AgentEvent) -> None:
         from agent.ui.event_handler import handle_event
 
-        handle_event(self._display, event)
-        html_fragment = event_to_html(event)
+        event_dict = event if isinstance(event, dict) else {}
+        event_type = event_dict.get("type", "")
+
+        if event_type == "streaming_token":
+            token = event_dict.get("token", "")
+            if not self._streaming_active:
+                self._start_streaming()
+            self._append_streaming_token(token)
+            handle_event(self._display, event_dict)
+            return
+
+        had_streaming = self._streaming_active
+        if had_streaming and event_type not in ("streaming_token",):
+            self._end_streaming()
+
+        if event_type == "done":
+            handle_event(self._display, event_dict)
+            answer = event_dict.get("answer", "")
+            if had_streaming or self._streaming_buffer:
+                self._replace_streaming_with_answer(answer)
+            else:
+                rendered = render_markdown(answer)
+                bubble = (
+                    f'<div style="margin: 12px 0; text-align: left;">'
+                    f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+                    f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+                    f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+                    f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
+                    f'{rendered}'
+                    f'</div></div></div>'
+                )
+                self._append_html(bubble)
+                self._answer_rendered = True
+            return
+
+        handle_event(self._display, event_dict)
+        html_fragment = event_to_html(event_dict)
         if html_fragment:
             self._append_html(html_fragment)
 
@@ -507,6 +667,10 @@ class AIAgentWindow(QMainWindow):
     def _start_agent(self, message: str) -> None:
         self._is_running = True
         self._stop_requested = False
+        self._streaming_active = False
+        self._streaming_buffer = ""
+        self._stream_start_pos = 0
+        self._answer_rendered = False
         self._display.reset()
         self._reset_stats()
 
@@ -549,7 +713,13 @@ class AIAgentWindow(QMainWindow):
             return
 
         answer = answer or "*(no response)*"
-        self._render_final(answer, self._display.elapsed, self._display.tool_count)
+
+        if self._answer_rendered:
+            self._append_streaming_metadata()
+        else:
+            self._render_final(answer, self._display.elapsed, self._display.tool_count)
+
+        self._answer_rendered = False
         self._history.append({"role": "assistant", "content": answer})
 
         self._send_btn.setEnabled(True)
@@ -565,6 +735,9 @@ class AIAgentWindow(QMainWindow):
 
     def _on_error(self, error_msg: str) -> None:
         self._is_running = False
+
+        if self._streaming_active:
+            self._end_streaming()
 
         if self._stop_requested:
             self._stop_requested = False
@@ -594,6 +767,8 @@ class AIAgentWindow(QMainWindow):
     def _on_stop(self) -> None:
         if not self._is_running:
             return
+        if self._streaming_active:
+            self._end_streaming()
         if self._worker:
             self._worker.cancel()
             QTimer.singleShot(5000, self._force_cleanup_if_needed)
@@ -628,6 +803,10 @@ class AIAgentWindow(QMainWindow):
         self._chat_text.setVisible(False)
         self._history = []
         self._session.memory.clear_short_term()
+        self._streaming_active = False
+        self._streaming_buffer = ""
+        self._stream_start_pos = 0
+        self._answer_rendered = False
         self._reset_stats()
 
     def _run_quick_action(self, prompt: str) -> None:
