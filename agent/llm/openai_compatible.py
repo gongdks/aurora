@@ -23,6 +23,7 @@ class OpenAICompatibleLLM(BaseLLMProvider):
             base_url=settings.OPENAI_BASE_URL,
             temperature=settings.OPENAI_TEMPERATURE,
             streaming=True,
+            timeout=settings.LLM_TIMEOUT_SEC,
         )
 
     def get_model(self) -> BaseChatModel:

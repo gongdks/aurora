@@ -42,6 +42,7 @@ from langgraph.graph import END, START, StateGraph
 from agent.config import settings
 from agent.llm.factory import create_llm
 from agent.progress import make_log, make_streaming_token
+from agent.utils.retry import CancelledError
 from agent.runner import (
     StreamingCallbackHandler,
     _BaseToolEventTracker,
@@ -770,7 +771,11 @@ Respond with numbered steps only."""
     # ------------------------------------------------------------------
 
     def _stream_llm_response(self, prompt: str, emit_tokens: bool = False) -> str:
-        """Stream LLM response, optionally emitting tokens via progress_callback."""
+        """Stream LLM response with cancellation support.
+
+        Timeout is handled by the LLM provider's HTTP client (timeout config).
+        Cancellation is checked between every token.
+        """
         collected: list[str] = []
         token_count = 0
         try:

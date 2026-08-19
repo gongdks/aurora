@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 from typing import Any
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
@@ -894,6 +895,8 @@ class AIAgentWindow(QMainWindow):
         self._start_agent(message)
 
     def _start_agent(self, message: str) -> None:
+        self._cleanup_finished_workers()
+
         self._is_running = True
         self._stop_requested = False
         self._streaming_active = False
@@ -913,6 +916,17 @@ class AIAgentWindow(QMainWindow):
         self._worker.error_signal.connect(self._on_error)
         self._worker.start()
         self._show_thinking_indicator()
+
+    def _cleanup_finished_workers(self) -> None:
+        """清理已完成的旧 worker，确保只有一个 worker 在运行。"""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(3000)
+            if self._worker.isRunning():
+                self._worker.terminate()
+                self._worker.wait(1000)
+            self._worker.deleteLater()
+        self._worker = None
 
     def _on_result(self, result: AgentResult) -> None:
         if result.status == AgentStatus.CANCELLED:
@@ -1006,7 +1020,12 @@ class AIAgentWindow(QMainWindow):
             self._end_streaming()
         if self._worker:
             self._worker.cancel()
-            QTimer.singleShot(5000, self._force_cleanup_if_needed)
+            self._worker.progress_signal.disconnect()
+            self._worker.result_signal.disconnect()
+            self._worker.finished_signal.disconnect()
+            self._worker.error_signal.disconnect()
+            self._worker.quit()
+            self._start_cleanup_timer()
         self._stop_requested = True
         if self._chat_view == "webengine":
             self._append_to_html(build_cancelled())
@@ -1019,18 +1038,32 @@ class AIAgentWindow(QMainWindow):
         self._set_status("就绪")
         self._update_stats()
 
-    def _force_cleanup_if_needed(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(2000)
-            if self._worker.isRunning():
-                self._worker.terminate()
-                self._worker.wait()
+    def _start_cleanup_timer(self) -> None:
+        """启动后台清理定时器，监控已停止的 worker 直到其退出。"""
+        if not hasattr(self, "_cleanup_timer"):
+            self._cleanup_timer = QTimer(self)
+            self._cleanup_timer.setInterval(500)
+            self._cleanup_timer.timeout.connect(self._poll_cleanup)
+            self._cleanup_deadline = 0
+        self._cleanup_deadline = int(time.time()) + 30
+        self._cleanup_timer.start()
+
+    def _poll_cleanup(self) -> None:
+        """每 500ms 检查一次 worker 是否已退出，超时则强制终止。"""
+        if not self._worker:
+            self._cleanup_timer.stop()
+            return
+        if not self._worker.isRunning():
             self._worker.deleteLater()
             self._worker = None
-            self._stop_requested = False
-            self._is_running = False
-            self._set_status("已强制终止")
+            self._cleanup_timer.stop()
+            return
+        if int(time.time()) >= self._cleanup_deadline:
+            self._worker.terminate()
+            self._worker.wait(1000)
+            self._worker.deleteLater()
+            self._worker = None
+            self._cleanup_timer.stop()
 
     def _on_clear(self) -> None:
         if self._is_running:
@@ -1210,6 +1243,10 @@ def main() -> None:
     app.setFont(font)
     window = AIAgentWindow()
     window.show()
+
+    from agent.utils.retry import shutdown_executor
+    app.aboutToQuit.connect(shutdown_executor)
+
     sys.exit(app.exec())
 
 

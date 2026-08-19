@@ -19,6 +19,7 @@ class OllamaLLM(BaseLLMProvider):
             base_url=settings.OLLAMA_BASE_URL,
             temperature=settings.OLLAMA_TEMPERATURE,
             streaming=True,
+            timeout=settings.LLM_TIMEOUT_SEC,
         )
 
     def get_model(self) -> BaseChatModel:

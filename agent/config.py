@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     MAX_SHORT_TERM_ROUNDS: int = 6
     MAX_RETRIES: int = 1
 
+    # ---- Network ----
+    LLM_TIMEOUT_SEC: int = 60
+    HTTP_TIMEOUT_SEC: int = 30
+
     # ---- Tools ----
     FILE_READER_ROOT: str = "."
     NOTES_DIR: str = "./agent_notes"

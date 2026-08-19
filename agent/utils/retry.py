@@ -21,6 +21,11 @@ T = TypeVar("T")
 _shared_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_timeout")
 
 
+def shutdown_executor() -> None:
+    """Shut down the shared thread pool on application exit."""
+    _shared_executor.shutdown(wait=False)
+
+
 class CancelledError(Exception):
     """Raised when a long-running operation is cancelled by the user."""
     pass
