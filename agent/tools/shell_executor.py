@@ -99,18 +99,10 @@ def _format_output(stdout: str, stderr: str, returncode: int) -> str:
     return output
 
 
-@register
+@register(tags={"core", "shell"})
 @tool
 def shell_executor(command: str, timeout: int = 30) -> str:
-    """在项目目录内安全执行 Shell 命令。
-
-    用于运行开发命令、安装依赖、运行测试、查看文件列表等。
-    所有命令在项目根目录下执行，有超时保护。
-
-    Args:
-        command: 要执行的命令，如 "ls -la"、"pip list"、"python -c 'print(1+1)'"、"git status"
-        timeout: 超时时间（秒），默认 30 秒，最大 60 秒
-    """
+    """在项目目录内安全执行 Shell 命令。"""
     safety_err = _check_command_safety(command)
     if safety_err:
         return f"[安全拦截] {safety_err}\n\n提示：{_ALLOWED_COMMANDS_HINT}"
@@ -147,17 +139,10 @@ def shell_executor(command: str, timeout: int = 30) -> str:
         return f"[错误] {exc}"
 
 
-@register
+@register(tags={"core", "shell"})
 @tool
 def shell_executor_multi(commands: str, timeout: int = 60) -> str:
-    """依次执行多条 Shell 命令，返回所有结果。
-
-    命令之间用 && 或换行分隔。适合需要连续执行的场景。
-
-    Args:
-        commands: 要执行的多条命令，用 && 或换行分隔
-        timeout: 总超时时间（秒），默认 60 秒
-    """
+    """依次执行多条 Shell 命令。"""
     parts: list[str] = []
     cmd_list = [c.strip() for c in re.split(r'&&|\n', commands) if c.strip()]
 

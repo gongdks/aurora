@@ -358,18 +358,10 @@ def _fmt_size(size: int) -> str:
     return f"{size / 1024 / 1024:.1f}MB"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_navigate(url: str) -> str:
-    """Open a webpage and extract its content.
-
-    This is the first step in browser interaction. The page content is
-    automatically extracted after navigation. Use browser_click, browser_type
-    etc. for further interaction.
-
-    Args:
-        url: URL to visit (https:// auto-prepended if missing), e.g. "baidu.com"
-    """
+    """打开网页并提取内容。"""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
@@ -410,18 +402,10 @@ def browser_navigate(url: str) -> str:
             return f"❌ Navigation failed: {exc}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_click(selector: str) -> str:
-    """Click an element on the current page.
-
-    Supports CSS selectors ("#submit", ".btn", "button"),
-    text matching ("text=Login", "text=Submit"),
-    and role selectors ("role=button[name='Search']").
-
-    Args:
-        selector: Element selector, e.g. "#login-btn", "text=Confirm", "role=button"
-    """
+    """点击当前页面上的元素。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -468,18 +452,10 @@ def browser_click(selector: str) -> str:
             return f"❌ Click failed: {exc}\n\nInteractive elements on page:\n{hint}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_type(selector: str, text: str) -> str:
-    """Type text into an input field.
-
-    Clears the field first, then types the text. Handles both visible and
-    hidden (React/Vue controlled) inputs automatically.
-
-    Args:
-        selector: Input field selector, e.g. "#search-input", "input[name='q']"
-        text: Text to type
-    """
+    """在输入框中输入文本。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -527,17 +503,10 @@ def browser_type(selector: str, text: str) -> str:
             return f"❌ Type failed: {exc}\n\nInput elements on page:\n{hint}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_press_key(selector: str, key: str) -> str:
-    """Press a keyboard key on an element.
-
-    Use for submitting forms (Enter), canceling (Escape), etc.
-
-    Args:
-        selector: Target element selector
-        key: Key name, e.g. "Enter", "Escape", "Tab", "ArrowDown"
-    """
+    """在元素上按下键盘按键。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -587,14 +556,10 @@ def browser_press_key(selector: str, key: str) -> str:
             return f"❌ Press key failed: {exc}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_snapshot() -> str:
-    """Get a text snapshot of the current page.
-
-    Use to re-read page content after interactions, or check current state.
-    Extracts page title, URL, and available text content.
-    """
+    """获取当前页面的文本快照。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -610,13 +575,10 @@ def browser_snapshot() -> str:
             return f"❌ Snapshot failed: {exc}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_list_interactive() -> str:
-    """List all clickable and typable elements on the current page.
-
-    Use when click or type operations fail, to find the correct selector.
-    """
+    """列出当前页面上的可交互元素。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -632,16 +594,10 @@ def browser_list_interactive() -> str:
         )
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_screenshot(filename: str = "screenshot.png") -> str:
-    """Save a screenshot of the current page.
-
-    Screenshots are saved to the agent_workspace directory.
-
-    Args:
-        filename: Screenshot filename, default "screenshot.png". Supports .png/.jpg.
-    """
+    """保存当前页面的截图。"""
     session = get_session()
     with session._lock:
         page, error = session.ensure_page()
@@ -667,12 +623,8 @@ def browser_screenshot(filename: str = "screenshot.png") -> str:
             return f"❌ Screenshot failed: {exc}"
 
 
-@register
+@register(tags={"web"})
 @tool
 def browser_close() -> str:
-    """Close the browser session and free resources.
-
-    Call this when browser tasks are complete.
-    Subsequent browser_navigate will auto-restart the browser.
-    """
+    """关闭浏览器会话并释放资源。"""
     return get_session().close()

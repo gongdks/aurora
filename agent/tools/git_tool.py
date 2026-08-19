@@ -66,16 +66,10 @@ def _check_git_available() -> str | None:
     return None
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_status(porcelain: bool = False) -> str:
-    """查看 Git 仓库的当前状态。
-
-    显示工作区和暂存区的文件变更情况。
-
-    Args:
-        porcelain: 是否使用简洁的 porcelain 格式
-    """
+    """查看 Git 仓库状态（工作区/暂存区变更）。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -91,7 +85,7 @@ def git_status(porcelain: bool = False) -> str:
     return _truncate(stdout.strip() or "(工作区干净，无变更)")
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_log(
     max_count: int = 10,
@@ -99,14 +93,7 @@ def git_log(
     author: str = "",
     since: str = "",
 ) -> str:
-    """查看 Git 提交历史日志。
-
-    Args:
-        max_count: 显示的最大提交数，默认 10
-        oneline: 是否使用单行精简格式
-        author: 按作者筛选，如 "Zhang"
-        since: 显示某时间之后的提交，如 "2024-01-01"、"7 days ago"
-    """
+    """查看 Git 提交历史日志。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -126,20 +113,14 @@ def git_log(
     return _truncate(stdout.strip() or "(无提交记录)")
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_diff(
     target: str = "HEAD",
     staged: bool = False,
     context_lines: int = 3,
 ) -> str:
-    """查看 Git 文件差异。
-
-    Args:
-        target: 对比的目标，如 "HEAD"、"main~1"、"abc123"
-        staged: 是否显示暂存区的差异
-        context_lines: 上下文行数，默认 3
-    """
+    """查看 Git 文件差异。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -157,14 +138,10 @@ def git_diff(
     return _truncate(stdout.strip() or "(无差异)")
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_branch(list_all: bool = False) -> str:
-    """查看 Git 分支列表。
-
-    Args:
-        list_all: 是否显示所有分支（含远程）
-    """
+    """查看 Git 分支列表。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -180,7 +157,7 @@ def git_branch(list_all: bool = False) -> str:
     return _truncate(stdout.strip() or "(无分支)")
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_remote() -> str:
     """查看 Git 远程仓库配置。"""
@@ -195,15 +172,10 @@ def git_remote() -> str:
     return _truncate(stdout.strip() or "(无远程仓库)")
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_show(commit: str, stat: bool = True) -> str:
-    """查看指定提交的详细信息。
-
-    Args:
-        commit: 提交哈希或引用，如 "HEAD"、"abc123"、"v1.0"
-        stat: 是否显示文件变更统计
-    """
+    """查看指定提交的详细信息。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -219,14 +191,10 @@ def git_show(commit: str, stat: bool = True) -> str:
     return _truncate(stdout.strip())
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_add(files: str = ".") -> str:
-    """将文件添加到 Git 暂存区。
-
-    Args:
-        files: 要添加的文件，多个用空格分隔，默认 "."（所有文件）
-    """
+    """将文件添加到 Git 暂存区。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -241,14 +209,10 @@ def git_add(files: str = ".") -> str:
     return f"✅ 已添加到暂存区：{files}"
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_commit(message: str) -> str:
-    """创建 Git 提交。
-
-    Args:
-        message: 提交信息（使用 -m 格式）
-    """
+    """创建 Git 提交。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -264,15 +228,10 @@ def git_commit(message: str) -> str:
     return _truncate(stdout.strip())
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_pull(remote: str = "origin", branch: str = "") -> str:
-    """从远程仓库拉取更新。
-
-    Args:
-        remote: 远程仓库名称，默认 "origin"
-        branch: 分支名，默认使用当前分支
-    """
+    """从远程仓库拉取更新。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -288,15 +247,10 @@ def git_pull(remote: str = "origin", branch: str = "") -> str:
     return _truncate(stdout.strip())
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_push(remote: str = "origin", branch: str = "") -> str:
-    """推送本地提交到远程仓库。
-
-    Args:
-        remote: 远程仓库名称，默认 "origin"
-        branch: 分支名，默认使用当前分支
-    """
+    """推送本地提交到远程仓库。"""
     git_err = _check_git_available()
     if git_err:
         return git_err
@@ -312,20 +266,15 @@ def git_push(remote: str = "origin", branch: str = "") -> str:
     return _truncate(stdout.strip())
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_diff_staged() -> str:
     """查看暂存区的变更差异。"""
     return git_diff(target="HEAD", staged=True)
 
 
-@register
+@register(tags={"dev", "git"})
 @tool
 def git_log_since(since: str = "7 days ago", max_count: int = 20) -> str:
-    """查看最近一段时间的 Git 提交记录。
-
-    Args:
-        since: 时间范围，如 "7 days ago"、"2024-01-01"、"1 week ago"
-        max_count: 最大提交数，默认 20
-    """
+    """查看最近一段时间的 Git 提交记录。"""
     return git_log(max_count=max_count, oneline=True, since=since)

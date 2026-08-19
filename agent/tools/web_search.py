@@ -296,27 +296,11 @@ def _format_results(results: list[dict], query: str, engine: str, search_type: s
     return "\n".join(lines)
 
 
-@register
+@register(tags={"core", "web"})
 @tool
 @tool_cache(key_func=lambda *a, **kw: f"{a[0] if a else kw.get('query','')}:{kw.get('engine', 'baidu')}:{kw.get('search_type', 'web')}", ttl=600)
 def web_search(query: str, engine: str = "baidu", search_type: str = "web") -> str:
-    """使用指定搜索引擎搜索信息，返回标题、摘要和链接。
-
-    支持 5 个搜索引擎：百度、必应、搜狗、360、Google。
-    支持网页搜索和资讯（新闻）搜索两种模式。
-
-    Args:
-        query: 搜索关键词，例如 "今天的 AI 新闻"
-        engine: 搜索引擎，可选值：
-            - "baidu": 百度（默认）
-            - "bing": 必应
-            - "sogou": 搜狗
-            - "360": 360 搜索
-            - "google": Google
-        search_type: 搜索类型，可选值：
-            - "web": 网页搜索（默认）
-            - "news": 资讯/新闻搜索
-    """
+    """使用指定搜索引擎搜索信息（支持百度/必应/搜狗/360/Google）。"""
     try:
         q = query.strip()
         if not q:

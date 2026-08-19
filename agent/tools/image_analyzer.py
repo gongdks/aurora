@@ -203,17 +203,10 @@ def _format_size(size: int) -> str:
     return f"{size / 1024 / 1024:.1f}MB"
 
 
-@register
+@register(tags={"file"})
 @tool
 def image_analyze(filepath: str) -> str:
-    """分析图片文件，返回尺寸、格式、大小等信息。
-
-    支持 JPG、PNG、GIF、BMP、WebP、TIFF 等常见格式。
-    如果 PIL/Pillow 可用，还会分析主色调和 EXIF 信息。
-
-    Args:
-        filepath: 图片文件路径，如 "uploads/photo.jpg"、"data/logo.png"
-    """
+    """分析图片文件，返回尺寸、格式、大小等信息。"""
     try:
         safe = safe_resolve(filepath, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -270,14 +263,10 @@ def image_analyze(filepath: str) -> str:
     return "\n".join(lines)
 
 
-@register
+@register(tags={"file"})
 @tool
 def image_batch_analyze(directory: str) -> str:
-    """批量分析目录下的所有图片。
-
-    Args:
-        directory: 目录路径，如 "uploads/"、"data/images/"
-    """
+    """批量分析目录下的所有图片。"""
     try:
         safe_dir = safe_resolve(directory, settings.FILE_READER_ROOT)
     except ValueError as exc:

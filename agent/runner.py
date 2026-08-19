@@ -19,7 +19,7 @@ from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from agent.config import settings
 from agent.progress import make_log, make_streaming_token, make_tool
 from agent.prompts import AGENT_PROMPT
-from agent.tools.registry import list_tools
+from agent.tools.registry import list_tools, list_scene_tools, ToolRouter
 from agent.utils.retry import CancelledError
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,8 @@ def build_react_executor(
     max_execution_time: int | None = None,
     return_intermediate_steps: bool = False,
     verbose: bool = False,
+    scene: str | None = None,
+    user_input: str | None = None,
 ) -> AgentExecutor:
     """构建一个 tool-calling AgentExecutor 实例（原生函数调用）。
 
@@ -143,11 +145,23 @@ def build_react_executor(
         max_execution_time: 最大执行时间，None 使用全局默认
         return_intermediate_steps: 是否返回中间步骤
         verbose: 是否启用详细日志
+        scene: 工具场景过滤（general/file/web/code/dev/analysis/research），None=全部加载
+        user_input: 用户输入（用于智能场景检测，自动选择工具）
 
     Returns:
         配置好的 AgentExecutor
     """
-    tools = list_tools()
+    if scene or user_input:
+        router = ToolRouter()
+        if user_input and not scene:
+            scene, tools = router.smart_route(user_input)
+            logger.info("[Router] Auto-detected scene: %s (%d tools)", scene, len(tools))
+        else:
+            tools = list_scene_tools(scene or "general")
+            logger.info("[Router] Scene '%s': %d tools", scene, len(tools))
+    else:
+        tools = list_tools()
+
     tool_names = ", ".join(t.name for t in tools)
     prompt = AGENT_PROMPT.partial(tool_names=tool_names)
     agent = create_tool_calling_agent(llm, tools, prompt)

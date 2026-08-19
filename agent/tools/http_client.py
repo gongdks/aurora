@@ -91,7 +91,7 @@ def _try_format_json(text: str) -> str:
         return text
 
 
-@register
+@register(tags={"web", "http"})
 @tool
 def http_request(
     url: str,
@@ -101,21 +101,7 @@ def http_request(
     content_type: str = "application/json",
     timeout: int = 15,
 ) -> str:
-    """发送 HTTP 请求，返回响应状态码、Headers 和 Body。
-
-    支持 GET、POST、PUT、PATCH、DELETE、HEAD、OPTIONS 方法。
-    可用于调用 REST API、测试后端接口、获取网页数据等。
-
-    Args:
-        url: 请求 URL，如 "https://api.example.com/users"
-        method: HTTP 方法，可选：GET、POST、PUT、PATCH、DELETE、HEAD、OPTIONS（默认 GET）
-        headers: 请求 Headers，支持两种格式：
-                 - JSON 格式：'{"Authorization": "Bearer token"}'
-                 - 每行一个：'Authorization: Bearer token\\nContent-Type: application/json'
-        body: 请求体内容（POST/PUT/PATCH 时使用）
-        content_type: 请求体 Content-Type，默认 "application/json"
-        timeout: 超时时间（秒），默认 15 秒
-    """
+    """发送 HTTP 请求（支持 GET/POST/PUT/DELETE 等方法）。"""
     err = _validate_url(url)
     if err:
         return f"[错误] {err}"
@@ -188,29 +174,15 @@ def http_request(
         return f"❌ 请求失败：{exc}"
 
 
-@register
+@register(tags={"web", "http"})
 @tool
 def http_get(url: str, headers: str = "", timeout: int = 15) -> str:
-    """发送 GET 请求的快捷方式。
-
-    Args:
-        url: 请求 URL
-        headers: 请求 Headers（可选）
-        timeout: 超时时间（秒）
-    """
+    """发送 GET 请求的快捷方式。"""
     return http_request(url=url, method="GET", headers=headers, timeout=timeout)
 
 
-@register
+@register(tags={"web", "http"})
 @tool
 def http_post(url: str, body: str = "", headers: str = "", content_type: str = "application/json", timeout: int = 15) -> str:
-    """发送 POST 请求的快捷方式。
-
-    Args:
-        url: 请求 URL
-        body: 请求体内容
-        headers: 请求 Headers（可选）
-        content_type: Content-Type，默认 application/json
-        timeout: 超时时间（秒）
-    """
+    """发送 POST 请求的快捷方式。"""
     return http_request(url=url, method="POST", headers=headers, body=body, content_type=content_type, timeout=timeout)

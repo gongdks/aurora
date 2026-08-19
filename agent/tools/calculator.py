@@ -123,18 +123,10 @@ def _format_result(value: float) -> str:
     return f"{rounded}"
 
 
-@register
+@register(tags={"core"})
 @tool
 def math_calculator(expression: str) -> str:
-    """数学计算器，支持四则运算、整除、取模、乘方、括号、常量和常用函数。
-
-    支持的运算符：+  -  *  /  //  %  ^(乘方)
-    支持的常量：pi, e, tau
-    支持的函数：abs, round, sqrt, sin, cos, tan, log, log2, log10, exp, floor, ceil
-
-    Args:
-        expression: 数学表达式，例如 "128 * 56 / 8 + 2^3"、"sqrt(144) + pi"
-    """
+    """数学计算器（支持四则运算、乘方、常用函数和常量）。"""
     try:
         result = _safe_eval(expression)
         formatted = _format_result(result)

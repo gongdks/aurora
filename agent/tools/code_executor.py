@@ -216,21 +216,10 @@ def _format_dataframe_preview(text: str) -> str:
     return text
 
 
-@register
+@register(tags={"core", "code"})
 @tool
 def code_executor(code: str) -> str:
-    """执行 Python 代码并返回结果。支持数据分析、绘图、计算等。
-
-    支持的库：pandas, numpy, matplotlib, seaborn, json, csv, collections, itertools, datetime, re, math, statistics 等。
-    代码运行在沙盒中，有 60 秒超时。可将结果保存到 workspace 目录。
-
-    Args:
-        code: 要执行的 Python 代码。支持：
-              - print() 输出结果
-              - matplotlib 绘图（自动保存为 PNG 到 workspace）
-              - pandas 数据分析（可保存 CSV/Excel 到 workspace）
-              - 任何纯计算逻辑
-    """
+    """执行 Python 代码（支持 pandas/numpy/matplotlib 等库，沙盒安全执行）。"""
     safety_err = _check_code_safety(code)
     if safety_err:
         return f"[安全检查] {safety_err}"

@@ -30,15 +30,10 @@ def _safe_note_path(name: str) -> str:
     return os.path.join(_ensure_notes_dir(), f"{safe_name}.txt")
 
 
-@register
+@register(tags={"core"})
 @tool
 def note_save(content: str) -> str:
-    """保存一条笔记。
-
-    Args:
-        content: 笔记内容，格式 "标题: 正文内容"（标题和正文用冒号空格分隔）。
-                 标题将作为文件名。
-    """
+    """保存一条笔记。"""
     if len(content) > 50_000:
         return f"笔记内容过大（{len(content)} > 50000 字符），拒绝保存"
 
@@ -57,14 +52,10 @@ def note_save(content: str) -> str:
         return f"保存笔记失败：{exc}"
 
 
-@register
+@register(tags={"core"})
 @tool
 def note_read(title: str) -> str:
-    """读取一条已保存的笔记。
-
-    Args:
-        title: 笔记标题（不含扩展名）
-    """
+    """读取一条已保存的笔记。"""
     try:
         path = _safe_note_path(title.strip())
         if not os.path.isfile(path):
@@ -76,7 +67,7 @@ def note_read(title: str) -> str:
         return f"读取笔记失败：{exc}"
 
 
-@register
+@register(tags={"core"})
 @tool
 def note_list() -> str:
     """列出所有已保存的笔记标题。"""

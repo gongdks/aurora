@@ -33,17 +33,10 @@ def _extract_text(html: str) -> str:
     return "\n".join(lines[:200])  # 限制 200 行
 
 
-@register
+@register(tags={"web"})
 @tool
 def web_fetcher(url: str) -> str:
-    """抓取网页内容，提取正文文本。
-
-    适用于新闻文章、文档页面等。
-    注意：无法抓取需要登录或 JavaScript 渲染的页面。
-
-    Args:
-        url: 要抓取的网页地址，例如 "https://example.com/article"
-    """
+    """抓取网页内容，提取正文文本。"""
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):

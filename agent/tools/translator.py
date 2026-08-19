@@ -106,24 +106,14 @@ def _translate_chunk(text: str, src: str, dst: str, timeout: int = 15) -> tuple[
         return text, "请求超时"
 
 
-@register
+@register(tags={"core", "translate"})
 @tool
 def translate(
     text: str,
     source_lang: str = "auto",
     target_lang: str = "en",
 ) -> str:
-    """翻译文本，支持多语言互译。
-
-    支持中文(zh)、英文(en)、日文(ja)、韩文(ko)、法文(fr)、德文(de)、
-    西班牙文(es)、俄文(ru)、意大利文(it)、葡萄牙文(pt)、阿拉伯文(ar)、
-    泰文(th)、越南文(vi) 等。
-
-    Args:
-        text: 要翻译的文本
-        source_lang: 源语言代码，如 "zh"、"en"、"ja"、"auto" 自动检测（默认 auto）
-        target_lang: 目标语言代码，如 "en"、"zh"、"ja"（默认 en）
-    """
+    """翻译文本，支持多语言互译。"""
     text = text.strip()
     if not text:
         return "❌ 文本不能为空"
@@ -169,22 +159,14 @@ def translate(
     return "\n".join(output_lines)
 
 
-@register
+@register(tags={"translate"})
 @tool
 def translate_batch(
     texts: str,
     target_lang: str = "en",
     source_lang: str = "auto",
 ) -> str:
-    """批量翻译多条文本（用 || 分隔）。
-
-    适用于需要翻译多个独立句子或短语的场景。
-
-    Args:
-        texts: 要翻译的多条文本，用 || 分隔，如 "你好||谢谢||再见"
-        target_lang: 目标语言代码（默认 en）
-        source_lang: 源语言代码（默认 auto 自动检测）
-    """
+    """批量翻译多条文本（用 || 分隔）。"""
     items = [t.strip() for t in texts.split(_BATCH_SEP) if t.strip()]
     if not items:
         return "❌ 没有可翻译的文本"

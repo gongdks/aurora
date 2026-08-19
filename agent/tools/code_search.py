@@ -74,7 +74,7 @@ def _collect_files(root: str, glob_pattern: str | None = None) -> list[str]:
 # 1. grep — 正则内容搜索
 # ============================================================================
 
-@register
+@register(tags={"code"})
 @tool
 def grep(
     pattern: str,
@@ -84,19 +84,7 @@ def grep(
     context: int = 0,
     max_count: int = 50,
 ) -> str:
-    """在项目文件中搜索匹配正则表达式的内容。
-
-    类似命令行 ripgrep (rg)，在项目目录内安全执行。
-    最常用于：查找函数/类定义、引用、TODO 注释、错误处理等。
-
-    Args:
-        pattern: 正则表达式，如 "def func_name"、"class MyClass"、"TODO"
-        path: 搜索目录，默认 "."（项目根目录）
-        glob: 文件名过滤，如 "*.py"、"*.{ts,tsx}"
-        ignore_case: 是否忽略大小写
-        context: 匹配行前后的上下文行数（-- 输出中标记）
-        max_count: 最大返回匹配数（默认 50）
-    """
+    """在项目文件中搜索匹配正则表达式的内容。"""
     try:
         root = safe_resolve(path, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -186,20 +174,13 @@ def grep(
 # 2. glob — 文件名模式匹配
 # ============================================================================
 
-@register
+@register(tags={"code"})
 @tool
 def glob(
     pattern: str,
     path: str = ".",
 ) -> str:
-    """在项目目录中查找匹配指定模式的路径。
-
-    支持标准 glob 模式：* 匹配任意字符，** 匹配任意深度目录。
-
-    Args:
-        pattern: 匹配模式，如 "**/*.py"、"src/**/*.ts"、"*.json"
-        path: 搜索根目录，默认 "."
-    """
+    """在项目目录中查找匹配指定模式的路径。"""
     try:
         root = safe_resolve(path, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -332,17 +313,10 @@ def _extract_generic_outline(filepath: str) -> list[str]:
 OUTLINE_MAX_LINES = 300
 
 
-@register
+@register(tags={"code"})
 @tool
 def code_outline(filepath: str) -> str:
-    """提取代码文件的结构大纲——列出函数、类、顶层定义。
-
-    用于快速了解代码文件的整体结构，无需阅读全部内容。
-    对 Python 文件使用 AST 解析（更精确），其他文件使用正则匹配。
-
-    Args:
-        filepath: 相对于项目根目录的代码文件路径，如 "agent/agent.py"
-    """
+    """提取代码文件的结构大纲（函数、类、顶层定义）。"""
     try:
         safe = safe_resolve(filepath, settings.FILE_READER_ROOT)
     except ValueError as exc:

@@ -48,7 +48,7 @@ from agent.runner import (
     build_react_executor,
     run_react_step,
 )
-from agent.tools.registry import list_tools
+from agent.tools.registry import list_tools, ToolRouter
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,7 @@ class GraphOrchestrator:
             max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
             verbose=True,
         )
+        self._scene_executors: dict[str, AgentExecutor] = {}
         self._last_token_count = 0
         try:
             self._graph = self._build_graph()
@@ -111,6 +112,24 @@ class GraphOrchestrator:
     def request_stop(self) -> None:
         """Signal cancellation to all LangGraph nodes."""
         self._cancel_event.set()
+
+    def _get_or_build_executor(self, scene: str | None = None) -> AgentExecutor:
+        """Get or create a scene-specific tool executor.
+
+        Main executor (all tools) is kept as fallback.
+        Scene executors are cached for reuse.
+        """
+        if not scene:
+            return self._executor
+        if scene not in self._scene_executors:
+            self._scene_executors[scene] = build_react_executor(
+                self._llm,
+                max_iterations=settings.MAX_ITERATIONS,
+                max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
+                verbose=True,
+                scene=scene,
+            )
+        return self._scene_executors[scene]
 
     def _build_graph(self) -> Any:
         graph = StateGraph(AgentState)
@@ -256,17 +275,30 @@ class GraphOrchestrator:
         self,
         input_text: str,
         chat_history_messages: list,
+        scene: str | None = None,
     ) -> dict[str, Any]:
         """Run a single ReAct tool-calling step with cancellation support.
 
+        Args:
+            input_text: Step instruction or user query
+            chat_history_messages: Conversation history
+            scene: Optional scene hint for tool routing (auto-detected if not set)
+
         Returns dict with: result, status, iterations, time, hit_limit,
-        tool_calls (count from tracker), llm_calls (count from tracker).
+        tool_calls, llm_calls.
         """
+        from agent.tools.registry import ToolRouter
+
+        if not scene and input_text:
+            scene, _ = ToolRouter().smart_route(input_text)
+
+        executor = self._get_or_build_executor(scene)
+
         tracker = _BaseToolEventTracker(self._progress_cb)
         streaming_handler = StreamingCallbackHandler(self._progress_cb)
 
         result = run_react_step(
-            self._executor,
+            executor,
             input_text,
             chat_history=chat_history_messages,
             progress_callback=self._progress_cb,

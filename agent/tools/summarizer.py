@@ -158,7 +158,7 @@ def _extract_key_points(text: str, num_points: int = 5) -> list[str]:
     return key_points
 
 
-@register
+@register(tags={"core", "summarize"})
 @tool
 def summarize_text(
     text: str,
@@ -166,16 +166,7 @@ def summarize_text(
     ratio: float = 0.0,
     include_key_points: bool = True,
 ) -> str:
-    """自动生成文本摘要，支持中英文。
-
-    使用 TextRank 算法提取原文核心句子，适合长文章、新闻、报告的快速总结。
-
-    Args:
-        text: 要摘要的文本内容
-        max_sentences: 摘要的最大句子数（默认 5 句，最小 1 句，最大 15 句）
-        ratio: 压缩比例（0 表示使用 max_sentences；0.1-0.5 表示压缩为原文的 10%-50%）
-        include_key_points: 是否同时列出关键要点（默认 True）
-    """
+    """自动生成文本摘要，支持中英文。"""
     text = text.strip()
     if not text:
         return "❌ 文本不能为空"
@@ -216,20 +207,14 @@ def summarize_text(
     return "\n".join(lines)
 
 
-@register
+@register(tags={"summarize", "file"})
 @tool
 def summarize_file(
     filepath: str,
     max_sentences: int = 5,
     include_key_points: bool = True,
 ) -> str:
-    """读取项目目录内的文本文件并生成摘要。
-
-    Args:
-        filepath: 文件路径，如 "output/article.txt"、"data/report.md"
-        max_sentences: 摘要的最大句子数（默认 5）
-        include_key_points: 是否列出关键要点（默认 True）
-    """
+    """读取文本文件并生成摘要。"""
     from agent.config import settings
     from agent.utils.path_guard import safe_resolve
 
@@ -258,22 +243,14 @@ def summarize_file(
     return f"📄 文件摘要：{rel_path}\n\n{result}"
 
 
-@register
+@register(tags={"summarize", "web"})
 @tool
 def summarize_url(
     url: str,
     max_sentences: int = 5,
     include_key_points: bool = True,
 ) -> str:
-    """抓取网页内容并生成摘要。
-
-    先抓取网页正文，再进行自动摘要。
-
-    Args:
-        url: 网页 URL，如 "https://example.com/article"
-        max_sentences: 摘要的最大句子数（默认 5）
-        include_key_points: 是否列出关键要点（默认 True）
-    """
+    """抓取网页内容并生成摘要。"""
     from agent.tools.web_content_fetcher import web_content_fetcher
 
     fetch_result = web_content_fetcher.invoke({"url": url})

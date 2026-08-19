@@ -30,7 +30,7 @@ def _read_file_for_diff(path: str) -> list[str] | None:
         return None
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_diff(
     file_a: str,
@@ -39,15 +39,7 @@ def file_diff(
     ignore_whitespace: bool = False,
     ignore_case: bool = False,
 ) -> str:
-    """对比两个文件的差异，输出类似 unified diff 的格式。
-
-    Args:
-        file_a: 第一个文件路径，如 "config_old.py"
-        file_b: 第二个文件路径，如 "config_new.py"
-        context: 上下文行数，默认 3
-        ignore_whitespace: 是否忽略空白差异
-        ignore_case: 是否忽略大小写
-    """
+    """对比两个文件的差异（unified diff 格式）。"""
     try:
         safe_a = safe_resolve(file_a, settings.FILE_READER_ROOT)
         safe_b = safe_resolve(file_b, settings.FILE_READER_ROOT)
@@ -110,28 +102,17 @@ def file_diff(
     return "\n".join(output_lines)
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_diff_summary(file_a: str, file_b: str) -> str:
-    """快速对比两个文件的摘要，仅显示变更统计和前几处差异。
-
-    Args:
-        file_a: 第一个文件路径
-        file_b: 第二个文件路径
-    """
+    """快速对比两个文件的摘要。"""
     return file_diff(file_a=file_a, file_b=file_b, context=2)
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_patch(original: str, modified: str, output: str = "") -> str:
-    """生成两个文件之间的 patch 补丁。
-
-    Args:
-        original: 原始文件路径
-        modified: 修改后的文件路径
-        output: 输出 patch 文件路径（可选），如 "changes.patch"
-    """
+    """生成两个文件之间的 patch 补丁。"""
     try:
         safe_a = safe_resolve(original, settings.FILE_READER_ROOT)
         safe_b = safe_resolve(modified, settings.FILE_READER_ROOT)

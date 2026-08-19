@@ -52,18 +52,13 @@ def _fmt_size(size: int) -> str:
     return f"{size / 1024 / 1024:.1f}MB"
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_zip(
     source: str,
     archive_name: str = "",
 ) -> str:
-    """将项目目录内的文件或文件夹压缩为 ZIP 归档。
-
-    Args:
-        source: 要压缩的文件或文件夹路径，如 "output/report.txt" 或 "src/"
-        archive_name: 输出的 ZIP 文件名（不含扩展名），默认自动生成
-    """
+    """将文件或文件夹压缩为 ZIP 归档。"""
     try:
         safe_source = safe_resolve(source, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -111,18 +106,13 @@ def file_zip(
         return f"❌ 创建归档失败：{exc}"
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_unzip(
     archive: str,
     extract_to: str = "",
 ) -> str:
-    """解压 ZIP 归档文件到项目目录内。
-
-    Args:
-        archive: ZIP 文件路径，如 "backup.zip"
-        extract_to: 解压到的目录（相对于项目根目录），默认解压到同名目录
-    """
+    """解压 ZIP 归档文件到项目目录。"""
     try:
         safe_archive = safe_resolve(archive, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -174,14 +164,10 @@ def file_unzip(
         return f"❌ 解压失败：{exc}"
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_zip_list(archive: str) -> str:
-    """列出 ZIP 归档文件的内容列表。
-
-    Args:
-        archive: ZIP 文件路径，如 "backup.zip"
-    """
+    """列出 ZIP 归档文件的内容列表。"""
     try:
         safe_archive = safe_resolve(archive, settings.FILE_READER_ROOT)
     except ValueError as exc:

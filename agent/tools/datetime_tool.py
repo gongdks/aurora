@@ -11,20 +11,10 @@ from langchain.tools import tool
 from agent.tools.registry import register
 
 
-@register
+@register(tags={"core"})
 @tool
 def datetime_query(question: str) -> str:
-    """查询当前日期、时间、星期或计算日期间隔。
-
-    常见用法：
-    - "今天几号" → 返回当前日期和星期
-    - "现在是几点" → 返回当前时间
-    - "3天后是几号" → 返回计算后的日期
-    - "从2026-01-01到现在过了多少天" → 返回天数
-
-    Args:
-        question: 关于日期时间的自然语言问题
-    """
+    """查询当前日期/时间或计算日期间隔。"""
     try:
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")

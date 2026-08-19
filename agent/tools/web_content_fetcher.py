@@ -327,24 +327,10 @@ def _format_output(data: dict, url: str, extract_mode: str) -> str:
 
 # ─── 主入口 ────────────────────────────────────────────────────────
 
-@register
+@register(tags={"web"})
 @tool
 def web_content_fetcher(url: str, extract_mode: str = "all") -> str:
-    """抓取指定 URL 的网页内容，返回结构化信息。
-
-    支持提取：页面标题、meta 描述、层级标题、正文段落、链接、图片。
-    自动检测并使用 requests+BeautifulSoup 或标准库回退方案。
-
-    Args:
-        url: 目标网页地址，例如 "https://example.com/article"
-        extract_mode: 提取模式，可选值：
-            - "all": 提取所有内容（默认）
-            - "meta": 仅提取标题和 meta 信息
-            - "headings": 仅提取层级标题
-            - "content": 仅提取正文段落
-            - "links": 仅提取链接
-            - "images": 仅提取图片
-    """
+    """抓取网页内容，返回结构化信息（标题/正文/链接/图片等）。"""
     try:
         parsed = urlparse(url.strip())
         if parsed.scheme not in ("http", "https"):

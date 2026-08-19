@@ -185,16 +185,10 @@ def _read_text(path: str, filename: str, max_chars: int = 100_000) -> str:
         return f"文本读取失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_reader(filename: str, max_pages: int = 50, max_rows: int = 500) -> str:
-    """读取任意类型文件内容（仅限项目目录内）。自动识别 PDF、Word、Excel、文本等格式。
-
-    Args:
-        filename: 文件路径，如 "docs/report.pdf"、"data/sales.xlsx"、"src/main.py"
-        max_pages: PDF 最多读取页数，默认 50
-        max_rows: Excel 最多读取行数，默认 500
-    """
+    """读取任意类型文件内容（自动识别 PDF/Word/Excel/文本等）。"""
     try:
         safe = _resolve_sandbox(filename)
     except ValueError as exc:

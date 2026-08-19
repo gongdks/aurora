@@ -208,32 +208,10 @@ def _open_path(full_path: str) -> None:
         subprocess.Popen(["xdg-open", full_path])
 
 
-@register
+@register(tags={"file"})
 @tool
 def file_opener(file_path: str) -> str:
-    """打开本地文件或文件夹（使用系统默认应用）。这是"打开"操作的唯一正确工具。
-
-    当用户说以下任何词语时，使用此工具：
-    - "打开" / "open" / "启动" / "运行"（指文件）
-    - "打开文件" / "open file"
-    - "打开桌面上的..." / "打开文档里的..."
-    - "帮我打开 xxx"
-
-    此工具会：
-    - 用系统默认程序打开文件（如 Word 打开 .docx，浏览器打开 .html，图片查看器打开 .png）
-    - 自动搜索桌面、文档、下载等常见目录
-    - 支持中文路径别名
-
-    Args:
-        file_path: 文件或文件夹路径。支持以下格式：
-                   - 中文名："桌面/at.txt"、"文档/report.pdf"、"下载/setup.exe"
-                   - 英文名："Desktop/at.txt"、"Documents/notes"
-                   - 波浪号："~/Desktop/at.txt"、"~/Documents/report.pdf"
-                   - 盘符："D盘/data.txt"、"E盘/项目/config.json"
-                   - 绝对路径："C:/Users/XXX/Desktop/at.txt"
-                   - 相对路径："report.pdf"（相对于项目根目录）
-                   - 纯文件名："at.txt"（自动搜索桌面、文档等常见位置）
-    """
+    """打开本地文件或文件夹（使用系统默认应用）。"""
     try:
         full = _resolve_path(file_path)
         display = os.path.basename(full)

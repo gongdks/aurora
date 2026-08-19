@@ -28,17 +28,10 @@ def _write_file(safe: str, content: str) -> None:
         fh.write(content)
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_writer(filename: str, content: str) -> str:
-    """创建或覆写文件。
-
-    用于创建新文件或完全替换已有文件的内容。
-
-    Args:
-        filename: 文件路径，相对于项目工作目录，如 "output/report.txt"、"src/main.py"
-        content: 要写入的完整文本内容
-    """
+    """创建或覆盖项目目录内的文件。"""
     try:
         safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         _write_file(safe, content)
@@ -50,18 +43,10 @@ def file_writer(filename: str, content: str) -> str:
         return f"写入失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_editor(filename: str, old_text: str, new_text: str) -> str:
-    """精确替换文件中的文本（仅替换首次出现）。
-
-    适用场景：修改函数名、变量名、单行配置等。
-
-    Args:
-        filename: 文件路径，如 "config.py"、"src/main.py"
-        old_text: 要查找并替换的文本（需精确匹配，含缩进）
-        new_text: 替换后的文本
-    """
+    """替换文件中首次出现的文本。"""
     try:
         safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
@@ -80,18 +65,10 @@ def file_editor(filename: str, old_text: str, new_text: str) -> str:
         return f"编辑失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_editor_all(filename: str, old_text: str, new_text: str) -> str:
-    """精确替换文件中所有匹配的文本（替换所有出现）。
-
-    适用场景：全局重命名变量、统一修改配置值等。
-
-    Args:
-        filename: 文件路径，如 "config.py"
-        old_text: 要查找并替换的文本（需精确匹配，含缩进）
-        new_text: 替换后的文本
-    """
+    """替换文件中所有匹配的文本。"""
     try:
         safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
@@ -110,7 +87,7 @@ def file_editor_all(filename: str, old_text: str, new_text: str) -> str:
         return f"编辑失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_editor_multiline(
     filename: str,
@@ -118,18 +95,7 @@ def file_editor_multiline(
     new_text: str,
     replace_all: bool = False,
 ) -> str:
-    """精确的多行文本替换——用于修改函数体、类定义、代码块等。
-
-    与 file_editor 类似，但专门优化了多行文本替换的体验。
-    old_text 必须精确匹配（含每行的缩进和空白）。
-    当 old_text 只在文件中出现一次时不需要 replace_all。
-
-    Args:
-        filename: 文件路径，如 "agent/tools/file_writer.py"
-        old_text: 要替换的原始文本（必须精确匹配，含所有缩进和空格）
-        new_text: 新文本
-        replace_all: 是否替换所有匹配（默认 False，仅替换第一处）
-    """
+    """精确的多行文本替换（用于修改函数体、类定义、代码块等）。"""
     try:
         safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
@@ -170,16 +136,10 @@ def file_editor_multiline(
         return f"编辑失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_list(directory: str = ".") -> str:
-    """List files in a directory (within project root).
-
-    Use directory_list for standard directory listing with sizes.
-
-    Args:
-        directory: Directory path relative to project root, defaults to "."
-    """
+    """列出目录中的文件列表。"""
     try:
         safe = safe_resolve(directory, settings.FILE_READER_ROOT)
         if not os.path.isdir(safe):
@@ -202,16 +162,10 @@ def file_list(directory: str = ".") -> str:
         return f"List failed: {exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_delete(filename: str) -> str:
-    """删除项目目录内的文件。
-
-    仅支持删除文件，不支持删除目录。
-
-    Args:
-        filename: 要删除的文件路径，如 "output/old_report.txt"
-    """
+    """删除项目目录内的文件。"""
     try:
         safe = safe_resolve(filename, settings.FILE_READER_ROOT)
         if not os.path.isfile(safe):
@@ -224,15 +178,10 @@ def file_delete(filename: str) -> str:
         return f"删除失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_copy(source: str, destination: str) -> str:
-    """复制项目目录内的文件。
-
-    Args:
-        source: 源文件路径，如 "data/original.csv"
-        destination: 目标路径，如 "data/backup.csv"
-    """
+    """复制项目目录内的文件。"""
     import shutil
 
     try:
@@ -252,15 +201,10 @@ def file_copy(source: str, destination: str) -> str:
         return f"复制失败：{exc}"
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def file_move(source: str, destination: str) -> str:
-    """移动项目目录内的文件（重命名或改变目录）。
-
-    Args:
-        source: 源文件路径，如 "data/old.csv"
-        destination: 目标路径，如 "archive/old.csv"
-    """
+    """移动项目目录内的文件（重命名或改变目录）。"""
     import shutil
 
     try:
@@ -279,14 +223,10 @@ def file_move(source: str, destination: str) -> str:
         return f"移动失败：{exc}"
 
 
-@register
+@register(tags={"file"})
 @tool
 def dir_create(path: str) -> str:
-    """创建目录（支持多级创建）。
-
-    Args:
-        path: 目录路径，如 "output/reports/2024"
-    """
+    """创建目录（支持多级创建）。"""
     try:
         safe = safe_resolve(path, settings.FILE_READER_ROOT)
         if os.path.exists(safe):
@@ -302,16 +242,10 @@ def dir_create(path: str) -> str:
         return f"创建目录失败：{exc}"
 
 
-@register
+@register(tags={"file"})
 @tool
 def dir_delete(path: str) -> str:
-    """删除项目目录内的空目录。
-
-    仅支持删除空目录。如需删除含文件的目录，请先删除目录中的文件。
-
-    Args:
-        path: 要删除的目录路径，如 "output/empty_dir"
-    """
+    """删除项目目录内的空目录。"""
     try:
         safe = safe_resolve(path, settings.FILE_READER_ROOT)
         if not os.path.isdir(safe):

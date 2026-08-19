@@ -24,18 +24,10 @@ _MAX_FILE_SIZE = 500_000
 # 1. lint — Python AST 语法 + 基本质量检查
 # ============================================================================
 
-@register
+@register(tags={"code"})
 @tool
 def code_lint(filepath: str) -> str:
-    """对 Python 文件执行静态分析，检查语法错误和常见代码问题。
-
-    使用 Python 内置的 ast 模块进行语法检查，
-    并扫描常见问题（未使用的导入、bare except 等）。
-    如果 pylint/flake8 可用则同时运行。
-
-    Args:
-        filepath: 相对于项目根目录的文件路径，如 "agent/agent.py"
-    """
+    """对 Python 文件执行静态分析，检查语法错误和常见问题。"""
     try:
         safe = safe_resolve(filepath, settings.FILE_READER_ROOT)
     except ValueError as exc:
@@ -149,17 +141,10 @@ def _try_external_linter(filepath: str) -> str | None:
 # 2. typecheck — 运行 mypy 类型检查
 # ============================================================================
 
-@register
+@register(tags={"code"})
 @tool
 def code_typecheck(filepath: str = ".") -> str:
-    """运行 mypy 类型检查（如果已安装）。
-
-    如果没有安装 mypy，会提示安装方法。
-    支持检查单个文件或整个目录。
-
-    Args:
-        filepath: 文件或目录路径，默认 "."（项目根目录）
-    """
+    """运行 mypy 类型检查（如果已安装）。"""
     try:
         safe = safe_resolve(filepath, settings.FILE_READER_ROOT)
     except ValueError as exc:

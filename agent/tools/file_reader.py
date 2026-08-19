@@ -37,27 +37,10 @@ def _detect_external_path(path: str) -> str | None:
     return None
 
 
-@register
+@register(tags={"core", "file"})
 @tool
 def text_reader(filename: str) -> str:
-    """读取项目目录内的纯文本文件内容，返回带行号的文本（仅限项目根目录内）。
-
-    此工具是"读取文件内容"，NOT "打开文件"！
-    - 当用户说"打开"文件 → 使用 file_opener（启动系统默认应用）
-    - 当用户说"读取/查看内容"且文件在项目目录内 → 使用此工具
-    - 需要带行号的文本阅读场景（如代码审查）
-
-    限制：
-    - 只能读取项目目录内的文件
-    - 不能读取桌面、文档、下载等外部目录
-    - 如果文件在外部目录，会自动提示使用 file_opener
-
-    支持 .txt、.py、.md、.json、.csv 等文本文件。
-    返回内容带行号，最多读取 500 行。
-
-    Args:
-        filename: 相对于项目根目录的路径，例如 "README.md"、"data/input.csv"
-    """
+    """读取项目目录内的文本文件（带行号，最多500行）。"""
     external_hint = _detect_external_path(filename)
     if external_hint:
         return external_hint
