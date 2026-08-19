@@ -22,11 +22,7 @@ def create_llm() -> BaseLLMProvider:
         from agent.llm.openai_compatible import OpenAICompatibleLLM
         return OpenAICompatibleLLM()
 
-    if provider == "ollama":
-        from agent.llm.ollama_llm import OllamaLLM
-        return OllamaLLM()
-
     raise ValueError(
         f"未知的 LLM_PROVIDER '{provider}'，"
-        f"可选值：openai, ollama"
+        f"可选值：openai"
     )

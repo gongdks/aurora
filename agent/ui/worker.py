@@ -84,11 +84,15 @@ class AgentWorker(QThread):
 
             elapsed = __import__("time").time() - start_time
 
+            token_usage = self._session.token_usage
+
             if self._cancel_event.is_set():
                 result = AgentResult(
                     content="⏹ 已停止",
                     status=AgentStatus.CANCELLED,
                     elapsed=elapsed,
+                    tool_calls=[],
+                    metadata={"token_usage": token_usage},
                 )
                 self.result_signal.emit(result)
                 self.finished_signal.emit("⏹ 已停止")
@@ -103,6 +107,7 @@ class AgentWorker(QThread):
                 status=status,
                 elapsed=elapsed,
                 tool_calls=[],
+                metadata={"token_usage": token_usage},
             )
             self.result_signal.emit(result)
             self.finished_signal.emit(answer)

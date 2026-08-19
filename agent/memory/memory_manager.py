@@ -69,19 +69,25 @@ class MemoryManager:
         return self.long_term.recent_summaries(limit)
 
     def format_long_term_context(self, user_input: str, limit: int = 5) -> str:
-        """Format relevant long-term memories as context for the current query."""
-        memories = self.long_term.search(user_input, limit=limit)
+        """Format relevant long-term memories as context for the current query.
+
+        Uses semantic search (embedding-based) for memories and keyword
+        fallback, then combines with recent conversation summaries.
+        """
+        memories = self.long_term.semantic_search(user_input, limit=limit)
+        if not memories:
+            memories = self.long_term.search(user_input, limit=limit)
         summaries = self.long_term.recent_summaries(limit=3)
         if not memories and not summaries:
             return ""
 
-        lines: list[str] = ["## Long-term Context"]
+        lines: list[str] = ["## 长期记忆"]
         if memories:
-            lines.append("\n### Relevant Memories")
+            lines.append("\n### 相关记忆")
             for m in memories:
                 lines.append(f"- [{m['category']}] {m['key']}: {m['content'][:200]}")
         if summaries:
-            lines.append("\n### Recent Conversations")
+            lines.append("\n### 最近对话")
             for s in summaries:
                 lines.append(f"- {s['summary'][:200]}")
 

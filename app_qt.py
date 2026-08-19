@@ -406,7 +406,7 @@ class AIAgentWindow(QMainWindow):
         stats_data = [
             ("耗时", "0.0s", COLORS["accent"]),
             ("工具", "0", COLORS["text"]),
-            ("步骤", "0", COLORS["text"]),
+            ("Token", "0", COLORS["text"]),
             ("状态", "●", COLORS["green"]),
         ]
         for i in range(0, len(stats_data), 2):
@@ -715,7 +715,10 @@ class AIAgentWindow(QMainWindow):
         sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
         self._set_stat("耗时", sec, COLORS["accent"])
         self._set_stat("工具", str(self._display.tool_count), COLORS["text"])
-        self._set_stat("步骤", str(self._display.step_count), COLORS["text"])
+        token_count = self._display.token_count
+        if token_count == 0:
+            token_count = self._session.token_usage.get("total_tokens", 0)
+        self._set_stat("Token", str(token_count), COLORS["text"])
         self._set_stat(
             "状态", "◉" if self._is_running else "●",
             COLORS["yellow"] if self._is_running else COLORS["green"],
@@ -729,9 +732,10 @@ class AIAgentWindow(QMainWindow):
 
     def _reset_stats(self) -> None:
         self._display.reset()
+        self._session.reset_token_usage()
         self._set_stat("耗时", "0.0s", COLORS["accent"])
         self._set_stat("工具", "0", COLORS["text"])
-        self._set_stat("步骤", "0", COLORS["text"])
+        self._set_stat("Token", "0", COLORS["text"])
         self._set_stat("状态", "●", COLORS["green"])
 
     def _adjust_input_height(self) -> None:
@@ -810,7 +814,7 @@ class AIAgentWindow(QMainWindow):
             handle_event(self._display, event_dict)
             return
 
-        if event_type in ("tool", "log", "done", "error"):
+        if event_type in ("tool", "log", "done", "error", "plan", "status"):
             self._remove_thinking_indicator()
 
         had_streaming = self._streaming_active
@@ -909,6 +913,12 @@ class AIAgentWindow(QMainWindow):
         self._set_buttons_state(True)
         self._set_status("思考中...", running=True)
 
+        if not hasattr(self, "_stats_timer"):
+            self._stats_timer = QTimer(self)
+            self._stats_timer.setInterval(1000)
+            self._stats_timer.timeout.connect(self._update_stats)
+        self._stats_timer.start()
+
         self._worker = AgentWorker(self._session, message, self._history)
         self._worker.progress_signal.connect(self._render_event)
         self._worker.result_signal.connect(self._on_result)
@@ -929,6 +939,11 @@ class AIAgentWindow(QMainWindow):
         self._worker = None
 
     def _on_result(self, result: AgentResult) -> None:
+        token_usage = result.metadata.get("token_usage", {})
+        total_tokens = token_usage.get("total_tokens", 0)
+        if total_tokens > 0:
+            self._display.add_tokens(total_tokens)
+
         if result.status == AgentStatus.CANCELLED:
             if self._chat_view == "webengine":
                 self._append_to_html(build_cancelled())
@@ -949,12 +964,20 @@ class AIAgentWindow(QMainWindow):
     def _on_finished(self, answer: str) -> None:
         self._is_running = False
         self._remove_thinking_indicator()
+        if hasattr(self, "_stats_timer"):
+            self._stats_timer.stop()
+
+        token_info = ""
+        token_usage = self._session.token_usage
+        total_tokens = token_usage.get("total_tokens", 0)
+        if total_tokens > 0:
+            token_info = f" | {total_tokens} tokens"
 
         if self._stop_requested:
             self._stop_requested = False
             self._set_buttons_state(False)
             self._input_box.setFocus()
-            self._set_status("就绪")
+            self._set_status(f"已停止{token_info}")
             self._update_stats()
             if self._worker:
                 self._worker.deleteLater()
@@ -973,7 +996,7 @@ class AIAgentWindow(QMainWindow):
 
         self._set_buttons_state(False)
         self._input_box.setFocus()
-        self._set_status("就绪")
+        self._set_status(f"完成{token_info}")
         self._update_stats()
 
         if self._worker:
@@ -983,6 +1006,8 @@ class AIAgentWindow(QMainWindow):
     def _on_error(self, error_msg: str) -> None:
         self._is_running = False
         self._remove_thinking_indicator()
+        if hasattr(self, "_stats_timer"):
+            self._stats_timer.stop()
 
         if self._streaming_active:
             self._end_streaming()
@@ -1016,6 +1041,8 @@ class AIAgentWindow(QMainWindow):
         if not self._is_running:
             return
         self._remove_thinking_indicator()
+        if hasattr(self, "_stats_timer"):
+            self._stats_timer.stop()
         if self._streaming_active:
             self._end_streaming()
         if self._worker:

@@ -6,6 +6,11 @@ Architecture:
   2. Each plan step executes via LangChain ReAct tool-calling executor.
   3. Simple queries are auto-detected and routed to the fast ReAct path.
 
+Thread safety:
+  GraphOrchestrator uses threading.local() for per-run context,
+  so multiple AgentSession instances (or concurrent invoke() calls)
+  can run safely without blocking each other.
+
 Orchestration flow:
   classify → simple → react_fast → END
   classify → complex → plan → execute_loop → verify → END/re-plan
@@ -19,7 +24,7 @@ from typing import Any
 from agent.graph_orchestrator import GraphOrchestrator
 from agent.llm.factory import create_llm
 from agent.memory.memory_manager import MemoryManager
-from agent.progress import safe_done
+from agent.progress import make_error, safe_done
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +39,10 @@ class AgentSession:
         - LangGraph orchestrator with planning, execution, verification
         - Auto-routing: simple queries → fast ReAct, complex → Plan-and-Execute
 
-    Usage:
-        session = AgentSession()
-        answer = session.invoke("help me analyze this log", chat_history=[])
+    Thread-safe: no global lock. Each invoke() call runs independently.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
         self._cancel_flag = threading.Event()
         self._is_running = False
         self._token_usage: dict[str, int] = {
@@ -61,7 +63,12 @@ class AgentSession:
     def token_usage(self) -> dict[str, int]:
         return dict(self._token_usage)
 
-    def _track_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+    def _track_usage(
+        self,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+    ) -> None:
         self._token_usage["prompt_tokens"] += prompt_tokens
         self._token_usage["completion_tokens"] += completion_tokens
         self._token_usage["total_tokens"] += total_tokens
@@ -95,14 +102,13 @@ class AgentSession:
         if extra_context:
             context = f"{short_term_text}\n\n{extra_context}"
 
-        with self._lock:
-            try:
-                answer = worker(context, messages_list)
-            except Exception as exc:
-                logger.error("Worker error: %s", exc, exc_info=True)
-                answer = f"Error: {exc}"
-            finally:
-                self._is_running = False
+        try:
+            answer = worker(context, messages_list)
+        except Exception as exc:
+            logger.error("Worker error: %s", exc, exc_info=True)
+            answer = f"错误: {exc}"
+        finally:
+            self._is_running = False
 
         if self._cancel_flag.is_set():
             answer = "⏹ 已停止"
@@ -112,14 +118,22 @@ class AgentSession:
         return answer
 
     def _graph_worker(self, context: str, messages: list) -> str:
+        def _track_tokens(count: int) -> None:
+            self._track_usage(total_tokens=count)
+
         return self._graph_orchestrator.run(
-            self._current_user_input, context, messages,
+            self._current_user_input,
+            context,
+            messages,
             progress_callback=self._current_progress_cb,
             cancel_event=self._cancel_flag,
+            token_tracker=_track_tokens,
         )
 
     def invoke(
-        self, user_input: str, chat_history: list,
+        self,
+        user_input: str,
+        chat_history: list,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> str:
@@ -130,10 +144,13 @@ class AgentSession:
         self._current_progress_cb = progress_callback
 
         long_term_context = self.memory.format_long_term_context(user_input)
-        extra_context = f"## Long-term Memory\n{long_term_context}" if long_term_context else ""
+        extra_context = f"## 长期记忆\n{long_term_context}" if long_term_context else ""
 
         return self._execute_with_cancel(
-            self._graph_worker, user_input, chat_history, progress_callback,
+            self._graph_worker,
+            user_input,
+            chat_history,
+            progress_callback,
             extra_context=extra_context,
             cancel_event=cancel_event,
         )
@@ -148,8 +165,7 @@ class AgentSession:
         return self._is_running
 
     def clear_long_term_memory(self) -> str:
-        with self._lock:
-            return self.memory.clear_long_term()
+        return self.memory.clear_long_term()
 
     @property
     def model_info(self) -> str:

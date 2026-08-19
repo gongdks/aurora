@@ -142,6 +142,34 @@ def status_for_log_message(message: str) -> str:
     return COLORS["text_secondary"]
 
 
+def plan_html(goal: str, steps: list[str]) -> str:
+    """Render a plan preview block."""
+    escaped_goal = _escape(goal)
+    steps_html = "".join(
+        f'<li style="margin: 2px 0;">{_escape(s)}</li>'
+        for s in steps
+    )
+    return f"""
+    <div style="margin: 8px 0; background-color: rgba(74, 108, 247, 0.06);
+         border: 1px solid rgba(74, 108, 247, 0.25); border-radius: 10px; padding: 10px 14px;">
+        <div style="color: {COLORS['accent']}; font-weight: 600; font-size: 13px; margin-bottom: 6px;">
+            📋 规划目标: {escaped_goal}
+        </div>
+        <ol style="margin: 0; padding-left: 20px; color: {COLORS['text_secondary']}; font-size: 13px; line-height: 1.6;">
+            {steps_html}
+        </ol>
+    </div>"""
+
+
+def status_html(message: str) -> str:
+    """Render a status update (progress indicator)."""
+    escaped = _escape(message)
+    return f"""
+    <div style="margin: 4px 0; font-size: 13px; color: {COLORS['accent']}; line-height: 1.5;">
+        {escaped}
+    </div>"""
+
+
 def event_to_html(event: dict[str, Any]) -> str:
     """Convert a progress event to an HTML fragment."""
     event_type = event.get("type", "")
@@ -188,5 +216,16 @@ def event_to_html(event: dict[str, Any]) -> str:
     if event_type == "streaming_token":
         token = event.get("token", "")
         return f'<span class="streaming-token" style="color: {COLORS["text"]};">{_escape(token)}</span>'
+
+    if event_type == "plan":
+        goal = event.get("goal", "")
+        steps = event.get("steps", [])
+        if steps:
+            return plan_html(goal, steps)
+        return ""
+
+    if event_type == "status":
+        message = event.get("message", "")
+        return status_html(message)
 
     return ""

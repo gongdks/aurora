@@ -14,19 +14,15 @@ Architecture:
                           ▼                 ▼
                      check_steps         re-plan → plan
 
-Adaptive features:
-  - Tier 1: Learned classifications (feedback from past runs)
-  - Tier 2: Keyword + heuristic scoring
-  - Tier 3: LLM classification (fallback)
-  - Runtime: Budget monitoring auto-upgrades/downgrades paths
-    * Simple path exceeding iterations/tool_calls/time → auto-upgrade to complex
-    * Complex path finishing in <=1 step and <10s → learned as simple
+Thread safety:
+  Uses threading.local() for per-run context. The compiled LangGraph
+  is read-only after __init__, so it is safe to share across threads.
+  Each run() call creates an independent _RunContext.
 
-Pure LangGraph provides: declarative routing, checkpointing,
-debug visualization, and typed state management.
-
-Each plan step is executed via the LangChain ReAct tool-calling
-executor, giving full tool access (file, web, code, browser, etc.).
+Cancellation:
+  cancel_event is checked at every node entry and between every LLM token.
+  On cancellation, nodes return immediately with a "cancelled" result.
+  HTTP-level timeouts are configured via LLM provider settings.
 """
 
 from __future__ import annotations
@@ -35,13 +31,14 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from agent.config import settings
 from agent.llm.factory import create_llm
-from agent.progress import make_log, make_streaming_token
+from agent.progress import make_log, make_plan, make_status, make_streaming_token
 from agent.utils.retry import CancelledError
 from agent.runner import (
     StreamingCallbackHandler,
@@ -76,30 +73,38 @@ class AgentState(TypedDict, total=False):
     complex_elapsed: float
 
 
+@dataclass
+class _RunContext:
+    """Per-run context — stored in threading.local for thread safety."""
+
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    progress_cb: Callable[[dict[str, Any]], None] | None = None
+    token_tracker: Callable[[int], None] | None = None
+    llm: Any = None
+    executor: Any = None
+    scene_executors: dict[str, Any] = field(default_factory=dict)
+    last_token_count: int = 0
+
+
 class GraphOrchestrator:
     """Pure LangGraph Plan-and-Execute orchestrator.
 
-    Combines LangGraph's deterministic routing and state management
-    with LangChain ReAct tool-calling for execution.
-
-    The graph:
-      1. classify → simple → react_fast → END
-      2. classify → complex → plan → execute_step → verify → END/re-plan
+    Thread-safe: the compiled graph is read-only after __init__.
+    Per-run state (cancel event, progress callback, LLM) is stored
+    in threading.local() and accessed via the _ctx property.
     """
 
+    _tls = threading.local()
+
     def __init__(self) -> None:
-        self._cancel_event = threading.Event()
-        self._progress_cb: Callable[[dict[str, Any]], None] | None = None
         self._llm_provider = create_llm()
         self._llm = self._llm_provider.get_model()
         self._executor = build_react_executor(
             self._llm,
             max_iterations=settings.MAX_ITERATIONS,
             max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
-            verbose=True,
+            verbose=settings.VERBOSE,
         )
-        self._scene_executors: dict[str, AgentExecutor] = {}
-        self._last_token_count = 0
         try:
             self._graph = self._build_graph()
         except Exception as exc:
@@ -110,27 +115,63 @@ class GraphOrchestrator:
             self._llm_provider.model_name,
         )
 
+    @property
+    def _ctx(self) -> _RunContext:
+        """Get current thread's run context."""
+        ctx = getattr(self._tls, "ctx", None)
+        if ctx is None:
+            raise RuntimeError("No active run context. run() must be called first.")
+        return ctx
+
+    @staticmethod
+    def _is_cancelled() -> bool:
+        """Check if the current run has been cancelled."""
+        ctx = getattr(GraphOrchestrator._tls, "ctx", None)
+        if ctx is None:
+            return False
+        return ctx.cancel_event.is_set()
+
+    @staticmethod
+    def _emit_log(message: str) -> None:
+        """Emit a log event via the current run's progress callback."""
+        ctx = getattr(GraphOrchestrator._tls, "ctx", None)
+        if ctx and ctx.progress_cb:
+            ctx.progress_cb(make_log(message))
+
+    @staticmethod
+    def _emit_plan(goal: str = "", steps: list[str] | None = None) -> None:
+        """Emit a plan event via the current run's progress callback."""
+        ctx = getattr(GraphOrchestrator._tls, "ctx", None)
+        if ctx and ctx.progress_cb:
+            ctx.progress_cb(make_plan(goal=goal, steps=steps or []))
+
+    @staticmethod
+    def _emit_status(message: str) -> None:
+        """Emit a status event via the current run's progress callback."""
+        ctx = getattr(GraphOrchestrator._tls, "ctx", None)
+        if ctx and ctx.progress_cb:
+            ctx.progress_cb(make_status(message))
+
     def request_stop(self) -> None:
-        """Signal cancellation to all LangGraph nodes."""
-        self._cancel_event.set()
+        """Signal cancellation to the current run (called from any thread)."""
+        ctx = getattr(self._tls, "ctx", None)
+        if ctx:
+            ctx.cancel_event.set()
 
-    def _get_or_build_executor(self, scene: str | None = None) -> AgentExecutor:
-        """Get or create a scene-specific tool executor.
-
-        Main executor (all tools) is kept as fallback.
-        Scene executors are cached for reuse.
-        """
+    def _get_or_build_executor(self, scene: str | None = None) -> Any:
+        """Get or create a scene-specific tool executor (per-run cache)."""
+        ctx = self._ctx
         if not scene:
-            return self._executor
-        if scene not in self._scene_executors:
-            self._scene_executors[scene] = build_react_executor(
-                self._llm,
+            return ctx.executor
+        if scene not in ctx.scene_executors:
+            ctx.scene_executors[scene] = build_react_executor(
+                ctx.llm,
                 max_iterations=settings.MAX_ITERATIONS,
                 max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
-                verbose=True,
+                verbose=settings.VERBOSE,
                 scene=scene,
             )
-        return self._scene_executors[scene]
+        return ctx.scene_executors[scene]
 
     def _build_graph(self) -> Any:
         graph = StateGraph(AgentState)
@@ -167,7 +208,6 @@ class GraphOrchestrator:
         )
 
         graph.add_edge("plan", "execute_step")
-
         graph.add_edge("execute_step", "check_steps")
 
         graph.add_conditional_edges(
@@ -199,48 +239,60 @@ class GraphOrchestrator:
         chat_history_messages: list,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
+        token_tracker: Callable[[int], None] | None = None,
     ) -> str:
-        self._cancel_event = cancel_event or threading.Event()
-        self._progress_cb = progress_callback
-
-        if self._graph is None:
-            return "[Error] LangGraph not available. Please check the logs for build errors."
-
-        initial_state: AgentState = {
-            "user_input": user_input,
-            "short_term_text": short_term_text,
-            "chat_history_messages": chat_history_messages,
-            "classification": "",
-            "plan": [],
-            "current_step": 0,
-            "results": [],
-            "result": "",
-            "is_done": False,
-            "plan_rounds": 0,
-            "graph_start_time": time.time(),
-            "fast_iterations": 0,
-            "fast_tool_calls": 0,
-            "fast_elapsed": 0.0,
-            "fast_hit_limit": False,
-            "complex_steps_executed": 0,
-            "complex_elapsed": 0.0,
-        }
+        ctx = _RunContext(
+            cancel_event=cancel_event or threading.Event(),
+            progress_cb=progress_callback,
+            token_tracker=token_tracker,
+            llm=self._llm,
+            executor=self._executor,
+        )
+        self._tls.ctx = ctx
 
         try:
-            final_state = self._graph.invoke(initial_state)
-        except Exception as exc:
-            logger.error("[GraphOrch] Graph error: %s", exc, exc_info=True)
-            if progress_callback:
-                progress_callback(make_log(f"❌ Graph error: {exc}"))
-            return f"Error: {exc}"
+            if self._graph is None:
+                return "[错误] LangGraph 不可用，请检查日志。"
 
-        self._record_complex_downgrade_feedback(final_state)
+            self._emit_status("开始分析...")
 
-        return final_state.get("result", "已完成，但未产生文本输出。")
+            initial_state: AgentState = {
+                "user_input": user_input,
+                "short_term_text": short_term_text,
+                "chat_history_messages": chat_history_messages,
+                "classification": "",
+                "plan": [],
+                "current_step": 0,
+                "results": [],
+                "result": "",
+                "is_done": False,
+                "plan_rounds": 0,
+                "graph_start_time": time.time(),
+                "fast_iterations": 0,
+                "fast_tool_calls": 0,
+                "fast_elapsed": 0.0,
+                "fast_hit_limit": False,
+                "complex_steps_executed": 0,
+                "complex_elapsed": 0.0,
+            }
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+            try:
+                final_state = self._graph.invoke(initial_state)
+            except Exception as exc:
+                logger.error("[GraphOrch] Graph error: %s", exc, exc_info=True)
+                self._emit_log(f"❌ 执行出错: {exc}")
+                return f"错误: {exc}"
+
+            self._record_complex_downgrade_feedback(final_state)
+
+            result = final_state.get("result", "")
+            if not result:
+                result = "已完成，但未产生文本输出。"
+
+            return result
+
+        finally:
+            self._tls.ctx = None
 
     @staticmethod
     def _format_chat_history(messages: list) -> str:
@@ -251,12 +303,17 @@ class GraphOrchestrator:
         for msg in messages[-10:]:
             role = getattr(msg, "type", "") or ""
             content = getattr(msg, "content", "") or ""
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in content
+                )
             if role == "human":
-                parts.append(f"User: {content}")
+                parts.append(f"用户: {content}")
             elif role == "ai":
-                parts.append(f"Assistant: {content}")
+                parts.append(f"助手: {content}")
             elif role == "system":
-                parts.append(f"System: {content[:200]}")
+                parts.append(f"系统: {content[:200]}")
         return "\n".join(parts)
 
     @staticmethod
@@ -264,10 +321,10 @@ class GraphOrchestrator:
         """Dynamically build tool description from the registry."""
         tools = list_tools()
         if not tools:
-            return "(no tools available)"
-        lines = ["Available tools:"]
+            return "(无可用工具)"
+        lines = ["可用工具:"]
         for t in tools:
-            name = getattr(t, "name", "unknown")
+            name = getattr(t, "name", "未知")
             desc = (getattr(t, "description", "") or "")[:120]
             lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
@@ -278,37 +335,45 @@ class GraphOrchestrator:
         chat_history_messages: list,
         scene: str | None = None,
     ) -> dict[str, Any]:
-        """Run a single ReAct tool-calling step with cancellation support.
-
-        Args:
-            input_text: Step instruction or user query
-            chat_history_messages: Conversation history
-            scene: Optional scene hint for tool routing (auto-detected if not set)
-
-        Returns dict with: result, status, iterations, time, hit_limit,
-        tool_calls, llm_calls.
-        """
-        from agent.tools.registry import ToolRouter
+        """Run a single ReAct tool-calling step with cancellation support."""
+        ctx = self._ctx
 
         if not scene and input_text:
             scene, _ = ToolRouter().smart_route(input_text)
 
         executor = self._get_or_build_executor(scene)
 
-        tracker = _BaseToolEventTracker(self._progress_cb)
-        streaming_handler = StreamingCallbackHandler(self._progress_cb, cancel_event=self._cancel_event)
-
-        result = run_react_step(
-            executor,
-            input_text,
-            chat_history=chat_history_messages,
-            progress_callback=self._progress_cb,
-            tracker=tracker,
-            cancel_event=self._cancel_event,
-            extra_callbacks=[streaming_handler],
+        tracker = _BaseToolEventTracker(ctx.progress_cb)
+        streaming_handler = StreamingCallbackHandler(
+            ctx.progress_cb,
+            cancel_event=ctx.cancel_event,
+            token_tracker=ctx.token_tracker,
         )
 
-        if self._cancel_event.is_set():
+        try:
+            result = run_react_step(
+                executor,
+                input_text,
+                chat_history=chat_history_messages,
+                progress_callback=ctx.progress_cb,
+                tracker=tracker,
+                cancel_event=ctx.cancel_event,
+                extra_callbacks=[streaming_handler],
+            )
+        except Exception as exc:
+            logger.error("[GraphOrch] Tool execution failed: %s", exc)
+            self._emit_log(f"⚠️ 工具执行失败: {exc}")
+            return {
+                "result": f"工具执行出错: {exc}",
+                "status": "error",
+                "iterations": 0,
+                "time": 0.0,
+                "hit_limit": False,
+                "tool_calls": 0,
+                "llm_calls": 0,
+            }
+
+        if ctx.cancel_event.is_set():
             return {
                 "result": "⏹ 已停止",
                 "status": "cancelled",
@@ -325,12 +390,7 @@ class GraphOrchestrator:
         return enriched
 
     def _record_complex_downgrade_feedback(self, final_state: AgentState) -> None:
-        """After graph completion: learn if complex queries could have been simple.
-
-        If a query was classified as "complex" but finished in <=1 plan step
-        and under 10 seconds, it would have been better handled by the simple
-        path. Record this feedback so the classifier learns for next time.
-        """
+        """After graph completion: learn if complex queries could have been simple."""
         from agent.utils.classifier import record_feedback
 
         classification = final_state.get("classification", "")
@@ -357,26 +417,21 @@ class GraphOrchestrator:
         """Classify query complexity — simple (fast path) or complex (plan+execute)."""
         from agent.utils.classifier import classify_query
 
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        # if self._progress_cb:
-        #     self._progress_cb(make_log("🤔 **Analyzing query complexity...**"))
+        classification = classify_query(self._ctx.llm, state["user_input"])
 
-        classification = classify_query(self._llm, state["user_input"])
-
-        # if self._progress_cb:
-        #     self._progress_cb(make_log(f"⚡ **Route: {classification}**"))
+        self._emit_log(f"🔍 查询分类: {classification}")
 
         return {"classification": classification}
 
     def _node_react_fast(self, state: AgentState) -> dict[str, Any]:
         """Execute a simple query via the LangChain ReAct fast path with budget tracking."""
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        # if self._progress_cb:
-        #     self._progress_cb(make_log("⚡ **Running fast ReAct path...**"))
+        self._emit_log("⚡ 执行快速路径...")
 
         exec_result = self._execute_step_with_tools(
             state["user_input"],
@@ -397,17 +452,10 @@ class GraphOrchestrator:
         }
 
     def _node_adaptive_check(self, state: AgentState) -> dict[str, Any]:
-        """After fast path: check if budget was exceeded and upgrade to complex if needed.
-
-        This is the core of the adaptive routing. If a query was classified
-        as "simple" but actually used too many iterations, tool calls, or
-        time, we reclassify it as "complex" and route to the plan+execute
-        path. The feedback is recorded so future identical queries will
-        be correctly classified from the start.
-        """
+        """After fast path: check if budget was exceeded and upgrade to complex if needed."""
         from agent.utils.classifier import record_feedback, get_budget
 
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         classification = state.get("classification", "simple")
@@ -423,20 +471,19 @@ class GraphOrchestrator:
         exceeded = budget.exceeded_simple_budget(iterations, tool_calls, elapsed)
 
         if hit_limit or exceeded:
-            if self._progress_cb:
-                reason_parts = []
-                if hit_limit:
-                    reason_parts.append("hit iteration/time limit")
-                if iterations >= budget.MAX_SIMPLE_ITERATIONS:
-                    reason_parts.append(f"iter={iterations}>={budget.MAX_SIMPLE_ITERATIONS}")
-                if tool_calls >= budget.MAX_SIMPLE_TOOL_CALLS:
-                    reason_parts.append(f"tools={tool_calls}>={budget.MAX_SIMPLE_TOOL_CALLS}")
-                if elapsed >= budget.MAX_SIMPLE_TIME_SEC:
-                    reason_parts.append(f"time={elapsed:.1f}s>={budget.MAX_SIMPLE_TIME_SEC}s")
-                reason = ", ".join(reason_parts) if reason_parts else "budget exceeded"
-                self._progress_cb(make_log(
-                    f"⚠️ **Fast path budget exceeded** ({reason}) → upgrading to complex path"
-                ))
+            reason_parts = []
+            if hit_limit:
+                reason_parts.append("达到迭代/时间上限")
+            if iterations >= budget.MAX_SIMPLE_ITERATIONS:
+                reason_parts.append(f"迭代次数={iterations}>={budget.MAX_SIMPLE_ITERATIONS}")
+            if tool_calls >= budget.MAX_SIMPLE_TOOL_CALLS:
+                reason_parts.append(f"工具调用={tool_calls}>={budget.MAX_SIMPLE_TOOL_CALLS}")
+            if elapsed >= budget.MAX_SIMPLE_TIME_SEC:
+                reason_parts.append(f"耗时={elapsed:.1f}s>={budget.MAX_SIMPLE_TIME_SEC}s")
+            reason = ", ".join(reason_parts) if reason_parts else "超出预算"
+            self._emit_log(
+                f"⚠️ 快速路径预算已超 ({reason}) → 升级到复杂路径"
+            )
 
             user_input = state.get("user_input", "")
             record_feedback(
@@ -454,24 +501,22 @@ class GraphOrchestrator:
             }
 
         logger.info(
-            "[Adaptive] Fast path OK: iter=%d tools=%d time=%.1fss (budget: max_iter=%d max_tools=%d max_time=%.1fs)",
+            "[Adaptive] Fast path OK: iter=%d tools=%d time=%.1fs",
             iterations, tool_calls, elapsed,
-            budget.MAX_SIMPLE_ITERATIONS, budget.MAX_SIMPLE_TOOL_CALLS, budget.MAX_SIMPLE_TIME_SEC,
         )
         return {}
 
     def _node_plan(self, state: AgentState) -> dict[str, Any]:
         """Create a step-by-step execution plan via LLM."""
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         plan_rounds = state.get("plan_rounds", 0)
 
-        if self._progress_cb:
-            if plan_rounds == 0:
-                self._progress_cb(make_log("📋 **Creating execution plan...**"))
-            else:
-                self._progress_cb(make_log(f"🔄 **Re-planning (round {plan_rounds + 1})...**"))
+        if plan_rounds == 0:
+            self._emit_status("📋 正在创建执行计划...")
+        else:
+            self._emit_status(f"🔄 重新规划 (第 {plan_rounds + 1} 轮)...")
 
         user_input = state.get("user_input", "")
         previous_plan = state.get("plan", [])
@@ -479,16 +524,16 @@ class GraphOrchestrator:
         chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
         tools_desc = self._build_tools_description()
 
-        context_parts = [f"User goal: {user_input}"]
+        context_parts = [f"用户目标: {user_input}"]
 
         if chat_history_text:
-            context_parts.append(f"Conversation history:\n{chat_history_text}")
+            context_parts.append(f"对话历史:\n{chat_history_text}")
 
         if previous_plan:
-            context_parts.append("Previous plan:")
+            context_parts.append("之前的计划:")
             for i, step in enumerate(previous_plan):
-                status = previous_results[i] if i < len(previous_results) else "(not executed)"
-                context_parts.append(f"  Step {i + 1}: {step} → {status[:200]}")
+                status = previous_results[i] if i < len(previous_results) else "(未执行)"
+                context_parts.append(f"  步骤 {i + 1}: {step} → {status[:200]}")
 
         context = "\n".join(context_parts)
 
@@ -496,39 +541,38 @@ class GraphOrchestrator:
 
 {tools_desc}
 
-Create a clear, step-by-step execution plan to achieve the user's goal.
-Break it into 2-5 concrete, actionable steps. Each step should be a single tool call or a simple action.
+请创建一个清晰的、分步的执行计划来实现用户目标。
+将其分解为 2-5 个具体的、可执行的步骤。每一步应该是一个单独的工具调用或简单操作。
 
-IMPORTANT: You MUST respond in Chinese (中文). All step descriptions must be in Chinese.
+重要：您必须使用中文回复。所有步骤描述必须使用中文。
 
-Respond with exactly one step per line, numbered:
+请按以下格式输出，每行一个步骤，带编号:
 1. [步骤描述 — 具体说明要做什么]
 2. [步骤描述]
 ...
 
-Only output the numbered steps, nothing else."""
+只输出编号步骤，不要输出其他内容。"""
 
         try:
             plan_text = self._stream_llm_response(prompt)
         except Exception as exc:
             logger.error("[GraphOrch] Plan generation failed: %s", exc)
-            if self._progress_cb:
-                self._progress_cb(make_log("⚠️ Plan generation failed, using fallback plan"))
-            plan_text = f"1. Analyze the request: {user_input}\n2. Execute the required action\n3. Summarize results"
+            self._emit_log("⚠️ 计划生成失败，使用备用计划")
+            plan_text = f"1. 分析请求: {user_input}\n2. 执行所需操作\n3. 总结结果"
 
         plan = self._parse_plan(plan_text)
 
         if not plan:
             plan = [
-                f"Analyze request: {user_input}",
-                "Execute the required action",
-                "Summarize the results",
+                f"分析请求: {user_input}",
+                "执行所需操作",
+                "总结结果",
             ]
 
-        if self._progress_cb:
-            self._progress_cb(make_log(f"📋 **Plan created: {len(plan)} steps**"))
-            for i, step in enumerate(plan):
-                self._progress_cb(make_log(f"  {i + 1}. {step[:120]}"))
+        self._emit_log(f"📋 计划已创建: {len(plan)} 个步骤")
+        self._emit_plan(goal=user_input, steps=plan)
+        for i, step in enumerate(plan):
+            self._emit_log(f"  {i + 1}. {step[:120]}")
 
         return {
             "plan": plan,
@@ -538,7 +582,7 @@ Only output the numbered steps, nothing else."""
 
     def _node_execute_step(self, state: AgentState) -> dict[str, Any]:
         """Execute the current plan step using the ReAct executor."""
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         current_step = state.get("current_step", 0)
@@ -549,12 +593,9 @@ Only output the numbered steps, nothing else."""
 
         step_description = plan[current_step]
 
-        if self._progress_cb:
-            self._progress_cb(
-                make_log(
-                    f"▶️ **Step {current_step + 1}/{len(plan)}**: {step_description[:120]}"
-                )
-            )
+        self._emit_log(
+            f"▶️ 步骤 {current_step + 1}/{len(plan)}: {step_description[:120]}"
+        )
 
         user_input = state.get("user_input", "")
         short_term_text = state.get("short_term_text", "")
@@ -562,24 +603,24 @@ Only output the numbered steps, nothing else."""
 
         context_sections = []
         if short_term_text:
-            context_sections.append(f"Previous context:\n{short_term_text[:800]}")
+            context_sections.append(f"之前的上下文:\n{short_term_text[:800]}")
 
-        step_prompt = f"""Execute this step to achieve the user's goal.
+        step_prompt = f"""执行此步骤以实现用户目标。
 
-User's original goal: {user_input}
-Current step: {step_description}
+用户原始目标: {user_input}
+当前步骤: {step_description}
 {chr(10).join(context_sections)}
 
-Perform the required action using available tools. If you need to read files,
-search the web, or run code, use the appropriate tools now.
+使用可用工具执行所需操作。如果需要读取文件、搜索网页或运行代码，请立即使用相应工具。
 
-IMPORTANT: You MUST respond in Chinese (中文). Think and respond in Chinese.
+重要：您必须使用中文回复。用中文思考和回复。
 
-After completing this step, provide a brief summary of what you did and what you found."""
+完成此步骤后，简要总结您做了什么以及发现了什么。"""
 
         result = self._execute_step_with_tools(step_prompt, chat_history)
 
         result_text = result.get("result", "") if isinstance(result, dict) else str(result)
+        result_text = self._truncate_output(result_text)
 
         results = list(state.get("results", []))
         while len(results) <= current_step:
@@ -588,10 +629,7 @@ After completing this step, provide a brief summary of what you did and what you
 
         complex_steps = state.get("complex_steps_executed", 0) + 1
 
-        if self._progress_cb:
-            self._progress_cb(
-                make_log(f"✅ Step {current_step + 1} completed: {result_text[:200]}")
-            )
+        self._emit_log(f"✅ 步骤 {current_step + 1} 完成: {result_text[:200]}")
 
         return {
             "results": results,
@@ -605,9 +643,7 @@ After completing this step, provide a brief summary of what you did and what you
         current_step = state.get("current_step", 0)
 
         if current_step >= len(plan):
-            if self._progress_cb:
-                self._progress_cb(make_log("📋 **All plan steps completed**"))
-            return {}
+            self._emit_log("📋 所有计划步骤已完成")
 
         return {}
 
@@ -619,73 +655,67 @@ After completing this step, provide a brief summary of what you did and what you
         plan_rounds = state.get("plan_rounds", 0)
         chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
 
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         if not results:
             return {"is_done": True}
 
-        if plan_rounds >= 3:
+        if plan_rounds >= settings.MAX_PLAN_ROUNDS:
             logger.info("[GraphOrch] Max re-plan rounds (%d) reached, ending", plan_rounds)
+            self._emit_log("⚠️ 达到最大重新规划次数，结束执行")
             return {"is_done": True}
 
-        if self._progress_cb:
-            self._progress_cb(make_log("🔍 **Verifying goal achievement...**"))
+        self._emit_log("🔍 正在验证目标达成情况...")
 
-        summary_parts = ["## Execution Results\n"]
+        summary_parts = ["## 执行结果\n"]
         for i, (step, result) in enumerate(zip(plan, results)):
-            summary_parts.append(f"**Step {i + 1}**: {step}")
-            summary_parts.append(f"Result: {result[:300]}")
+            summary_parts.append(f"**步骤 {i + 1}**: {step}")
+            summary_parts.append(f"结果: {result[:300]}")
             summary_parts.append("")
 
         full_summary = "\n".join(summary_parts)
 
         context_block = ""
         if chat_history_text:
-            context_block = f"\n\nConversation context:\n{chat_history_text[:600]}"
+            context_block = f"\n\n对话上下文:\n{chat_history_text[:600]}"
 
         prompt = f"""{full_summary}{context_block}
 
-Original user goal: {user_input}
+用户原始目标: {user_input}
 
-Based on the execution results above, is the user's goal fully achieved?
+基于以上执行结果，判断用户目标是否已完全实现？
 
-IMPORTANT: You MUST respond in Chinese (中文).
+重要：您必须使用中文回复。
 
-Answer exactly 'yes' or 'no', then provide a brief explanation in Chinese.
-If yes, also provide a concise final answer to the user in Chinese.
-If no, explain what is still missing in Chinese."""
+请明确回答"是"或"否"，然后用中文提供简要解释。
+如果回答"是"，请同时用中文为用户提供简洁的最终答案。
+如果回答"否"，请用中文解释还缺少什么。"""
 
         try:
             verification = self._stream_llm_response(prompt)
 
-            if self._progress_cb:
-                self._progress_cb(make_log(f"🔍 Verification: {verification[:200]}"))
+            self._emit_log(f"🔍 验证结果: {verification[:200]}")
 
-            is_complete = verification.strip().lower().startswith("yes")
+            is_complete = verification.strip().lower().startswith(("yes", "是"))
 
             if is_complete:
                 final_answer = self._extract_final_answer(verification, user_input, results)
-                if self._progress_cb:
-                    self._progress_cb(make_log("🎯 **Goal achieved!**"))
+                self._emit_log("🎯 目标已达成!")
                 return {
                     "result": final_answer,
                     "is_done": True,
                 }
 
             if plan_rounds >= 2:
-                if self._progress_cb:
-                    self._progress_cb(
-                        make_log("⚠️ Max re-plans reached, accepting current results")
-                    )
+                self._emit_log("⚠️ 达到最大重新规划次数，接受当前结果")
                 final_answer = self._extract_final_answer(verification, user_input, results)
                 return {
                     "result": final_answer,
                     "is_done": True,
                 }
 
-            if self._progress_cb:
-                self._progress_cb(make_log("🔄 **Goal not fully achieved, re-planning...**"))
+            self._emit_log("🔍 目标未完全达成，需要重新规划...")
 
             return {
                 "result": verification,
@@ -694,10 +724,9 @@ If no, explain what is still missing in Chinese."""
 
         except Exception as exc:
             logger.warning("[GraphOrch] Verification failed: %s", exc)
-            if self._progress_cb:
-                self._progress_cb(make_log("⚠️ Verification failed, proceeding with results"))
+            self._emit_log("⚠️ 验证失败，基于已有结果继续")
             final_answer = self._extract_final_answer(
-                "Verification failed", user_input, results
+                f"验证失败: {exc}", user_input, results
             )
             return {
                 "result": final_answer,
@@ -706,16 +735,13 @@ If no, explain what is still missing in Chinese."""
 
     def _node_re_plan(self, state: AgentState) -> dict[str, Any]:
         """Re-plan remaining steps after verification found gaps."""
-        if self._cancel_event and self._cancel_event.is_set():
+        if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         plan_rounds = state.get("plan_rounds", 0)
         new_plan_rounds = plan_rounds + 1
 
-        if self._progress_cb:
-            self._progress_cb(
-                make_log(f"📋 **Re-planning (round {new_plan_rounds})...**")
-            )
+        self._emit_status(f"📋 重新规划 (第 {new_plan_rounds} 轮)...")
 
         user_input = state.get("user_input", "")
         results = state.get("results", [])
@@ -723,41 +749,42 @@ If no, explain what is still missing in Chinese."""
         verification_feedback = state.get("result", "")
         chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
 
-        prompt = f"""Original goal: {user_input}
+        plan_lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan))
+        result_lines = "\n".join(f"步骤 {i + 1}: {r[:200]}" for i, r in enumerate(results))
 
-Previous plan:
-{chr(10).join(f'{i + 1}. {s}' for i, s in enumerate(plan))}
+        prompt = f"""原始目标: {user_input}
 
-Previous results:
-{chr(10).join(f'Step {i + 1}: {r[:200]}' for i, r in enumerate(results))}
+之前的计划:
+{plan_lines}
 
-Verification feedback: {verification_feedback[:500]}
-{chr(10).join('Conversation context:' if chat_history_text else '')}
+之前的结果:
+{result_lines}
+
+验证反馈: {verification_feedback[:500]}
+{chr(10).join('对话上下文:' if chat_history_text else '')}
 {chat_history_text[:400] if chat_history_text else ''}
 
-Create a NEW execution plan to address the remaining work.
-Only list steps that still need to be done.
+请创建一个新的执行计划来完成剩余工作。
+只列出仍需完成的步骤。
 
-IMPORTANT: You MUST respond in Chinese (中文). All step descriptions must be in Chinese.
+重要：您必须使用中文回复。所有步骤描述必须使用中文。
 
-Respond with numbered steps only."""
+请只输出编号步骤。"""
 
         try:
             plan_text = self._stream_llm_response(prompt)
             new_plan = self._parse_plan(plan_text)
         except Exception as exc:
             logger.error("[GraphOrch] Re-plan failed: %s", exc)
-            new_plan = [f"Complete remaining work for: {user_input}"]
+            self._emit_log("⚠️ 重新规划失败，使用简单替代方案")
+            new_plan = [f"完成剩余工作: {user_input}"]
 
         if not new_plan:
-            new_plan = [f"Complete remaining work for: {user_input}"]
+            new_plan = [f"完成剩余工作: {user_input}"]
 
-        if self._progress_cb:
-            self._progress_cb(
-                make_log(f"📋 **New plan: {len(new_plan)} steps**")
-            )
-            for i, step in enumerate(new_plan):
-                self._progress_cb(make_log(f"  {i + 1}. {step[:120]}"))
+        self._emit_log(f"📋 新计划: {len(new_plan)} 个步骤")
+        for i, step in enumerate(new_plan):
+            self._emit_log(f"  {i + 1}. {step[:120]}")
 
         return {
             "plan": new_plan,
@@ -774,31 +801,40 @@ Respond with numbered steps only."""
         """Stream LLM response with cancellation support.
 
         Timeout is handled by the LLM provider's HTTP client (timeout config).
-        Cancellation is checked between every token.
+        Cancellation is checked between every token for responsive stopping.
         """
+        ctx = self._ctx
         collected: list[str] = []
         token_count = 0
         try:
-            for chunk in self._llm.stream(prompt):
-                if self._cancel_event and self._cancel_event.is_set():
+            for chunk in ctx.llm.stream(prompt):
+                if ctx.cancel_event.is_set():
+                    logger.info("[GraphOrch] Stream cancelled by user")
                     break
                 token = chunk.content
                 if token:
                     collected.append(token)
                     token_count += 1
-                    if emit_tokens and self._progress_cb:
-                        self._progress_cb(make_streaming_token(token))
-        except Exception:
-            pass
-        self._last_token_count = token_count
+                    if emit_tokens and ctx.progress_cb:
+                        ctx.progress_cb(make_streaming_token(token))
+        except Exception as exc:
+            logger.warning("[GraphOrch] Stream error: %s", exc)
+            self._emit_log(f"⚠️ 流式输出中断: {exc}")
+        ctx.last_token_count = token_count
+        if ctx.token_tracker and token_count > 0:
+            ctx.token_tracker(token_count)
         return "".join(collected)
+
+    def _truncate_output(self, text: str) -> str:
+        """Truncate long tool outputs to avoid context bloat."""
+        limit = settings.TOOL_OUTPUT_TRUNCATE
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n... [输出已截断，共 {len(text)} 字符]"
 
     @staticmethod
     def _parse_plan(plan_text: str) -> list[str]:
-        """Parse a numbered plan from LLM output.
-
-        Expected format: lines starting with '1.', '2.', etc.
-        """
+        """Parse a numbered plan from LLM output."""
         steps: list[str] = []
         for line in plan_text.split("\n"):
             line = line.strip()
@@ -828,10 +864,13 @@ Respond with numbered steps only."""
 
         for line in lines:
             stripped = line.strip()
-            if stripped.lower().startswith("yes") and not found_yes:
+            if not found_yes and (
+                stripped.lower().startswith("yes")
+                or stripped.startswith("是")
+            ):
                 found_yes = True
-                remainder = stripped[3:].strip(".,;:：,。； ")
-                if remainder and len(remainder) > 10:
+                remainder = stripped[3:].strip(".,;:：,。； ") if stripped.lower().startswith("yes") else stripped[1:].strip("，。； ")
+                if remainder and len(remainder) > 5:
                     answer_lines.append(remainder)
                 continue
             if found_yes and stripped:
@@ -842,10 +881,10 @@ Respond with numbered steps only."""
 
         if results:
             return "\n\n".join(
-                f"**Result {i + 1}**: {r[:500]}" for i, r in enumerate(results)
+                f"**结果 {i + 1}**: {r[:500]}" for i, r in enumerate(results)
             )
 
-        return f"Task completed for: {user_input}"
+        return f"任务已完成: {user_input}"
 
     # ------------------------------------------------------------------
     # Routing logic
@@ -857,7 +896,6 @@ Respond with numbered steps only."""
 
     @staticmethod
     def _route_after_adaptive(state: AgentState) -> str:
-        """After adaptive check: either end (fast path OK) or upgrade to complex."""
         if state.get("classification") == "complex":
             return "upgrade"
         return "end"

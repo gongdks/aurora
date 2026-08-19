@@ -7,12 +7,13 @@ from typing import Any
 
 
 class DisplayState:
-    """Tracks display-level statistics (elapsed time, tool count, step count)."""
+    """Tracks display-level statistics (elapsed time, tool count, step count, tokens)."""
 
     def __init__(self) -> None:
         self._start_time: float | None = None
         self._tool_count: int = 0
         self._step_count: int = 0
+        self._token_count: int = 0
 
     @property
     def elapsed(self) -> float:
@@ -28,10 +29,18 @@ class DisplayState:
     def step_count(self) -> int:
         return self._step_count
 
+    @property
+    def token_count(self) -> int:
+        return self._token_count
+
+    def add_tokens(self, count: int) -> None:
+        self._token_count += count
+
     def reset(self) -> None:
         self._start_time = None
         self._tool_count = 0
         self._step_count = 0
+        self._token_count = 0
 
     def _ensure_started(self) -> None:
         if self._start_time is None:
@@ -54,6 +63,12 @@ def handle_event(display: DisplayState, event: dict[str, Any]) -> None:
     elif event_type == "log":
         display._ensure_started()
         display._step_count += 1
+
+    elif event_type == "plan":
+        display._ensure_started()
+
+    elif event_type == "status":
+        display._ensure_started()
 
     elif event_type == "done":
         display._ensure_started()

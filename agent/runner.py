@@ -62,7 +62,7 @@ class _BaseToolEventTracker(BaseCallbackHandler):
         self._llm_call_count += 1
         if self._cb:
             prefix = f"💭 {self._step_label}: " if self._step_label else "💭 "
-            self._cb(make_log(f"{prefix}Thinking..."))
+            self._cb(make_log(f"{prefix}思考中..."))
 
     def on_agent_action(self, action: Any, **kwargs: Any) -> None:
         """Legacy ReAct agent action callback — kept for backward compatibility."""
@@ -116,23 +116,38 @@ class StreamingCallbackHandler(BaseCallbackHandler):
     When streaming is enabled on the LLM, LangChain calls on_llm_new_token
     for each token as it arrives. This handler converts those tokens into
     STREAMING_TOKEN progress events so the UI can render them in near-real-time.
+    Also tracks token usage via an optional token_tracker callback.
     """
 
     def __init__(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         cancel_event: threading.Event | None = None,
+        token_tracker: Callable[[int], None] | None = None,
     ) -> None:
         super().__init__()
         self._cb = progress_callback
         self._buffer: list[str] = []
         self._cancel_event = cancel_event
+        self._token_tracker = token_tracker
+        self._token_count = 0
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         if self._cancel_event and self._cancel_event.is_set():
             raise CancelledError("Stream cancelled by user")
+        self._token_count += 1
         if self._cb:
             self._cb(make_streaming_token(token))
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        if self._token_tracker and self._token_count > 0:
+            self._token_tracker(self._token_count)
+        self._token_count = 0
+
+    def on_llm_error(self, error: Any, **kwargs: Any) -> None:
+        if self._token_tracker and self._token_count > 0:
+            self._token_tracker(self._token_count)
+        self._token_count = 0
 
 
 def build_react_executor(

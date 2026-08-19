@@ -130,6 +130,32 @@ body {
     font-size: 13px;
     line-height: 1.5;
 }
+.msg-plan {
+    margin: 8px 0;
+    background-color: rgba(74, 108, 247, 0.06);
+    border: 1px solid rgba(74, 108, 247, 0.25);
+    border-radius: 10px;
+    padding: 10px 14px;
+}
+.msg-plan .plan-goal {
+    color: #4a6cf7;
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 6px;
+}
+.msg-plan .plan-steps {
+    margin: 0;
+    padding-left: 20px;
+    color: #656d76;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.msg-status {
+    margin: 4px 0;
+    font-size: 13px;
+    color: #4a6cf7;
+    line-height: 1.5;
+}
 .msg-done-preview {
     margin: 8px 0;
 }
@@ -383,6 +409,24 @@ def build_log(text: str, color: str = "#656d76", msg_id: str = "") -> str:
     return f'<div class="msg-log"{id_attr} style="color:{color}">{escaped}</div>'
 
 
+def build_plan(goal: str, steps: list[str], msg_id: str = "") -> str:
+    escaped_goal = html.escape(goal)
+    steps_html = "".join(f"<li>{html.escape(s)}</li>" for s in steps)
+    id_attr = f' id="{msg_id}"' if msg_id else ""
+    return (
+        f'<div class="msg-plan"{id_attr}>'
+        f'<div class="plan-goal">📋 规划目标: {escaped_goal}</div>'
+        f'<ol class="plan-steps">{steps_html}</ol>'
+        f'</div>'
+    )
+
+
+def build_status(text: str, msg_id: str = "") -> str:
+    escaped = html.escape(text)
+    id_attr = f' id="{msg_id}"' if msg_id else ""
+    return f'<div class="msg-status"{id_attr}>{escaped}</div>'
+
+
 def build_event_html(event: dict[str, Any]) -> str:
     event_type = event.get("type", "")
     if event_type == "tool":
@@ -411,6 +455,17 @@ def build_event_html(event: dict[str, Any]) -> str:
     if event_type == "streaming_token":
         token = event.get("token", "")
         return html.escape(token)
+
+    if event_type == "plan":
+        goal = event.get("goal", "")
+        steps = event.get("steps", [])
+        if steps:
+            return build_plan(goal, steps)
+        return ""
+
+    if event_type == "status":
+        message = event.get("message", "")
+        return build_status(message)
 
     return ""
 
