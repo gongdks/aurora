@@ -61,6 +61,17 @@ _SAFE_NODE_TYPES = frozenset({
     "Lambda",
     "Import", "ImportFrom", "alias",
     "Module",
+    # Operators (binary)
+    "Add", "Sub", "Mult", "Div", "Mod", "Pow",
+    "LShift", "RShift", "BitOr", "BitXor", "BitAnd",
+    "MatMult", "FloorDiv",
+    # Operators (unary)
+    "UAdd", "USub", "Not", "Invert",
+    # Operators (boolean)
+    "And", "Or",
+    # Operators (comparison)
+    "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE",
+    "Is", "IsNot", "In", "NotIn",
 })
 
 _MATPLOTLIB_PRESETUP = """

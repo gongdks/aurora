@@ -9,21 +9,29 @@ live in agent/ modules. This file only handles:
 
 from __future__ import annotations
 
+import base64
 import html
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
 from typing import Any
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QCursor, QFont, QIcon, QKeySequence, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtGui import QAction, QCursor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QTextEdit, QVBoxLayout, QWidget, QTextBrowser,
+    QSplitter, QTextEdit, QVBoxLayout, QWidget,
 )
+
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    _WEBENGINE_AVAILABLE = True
+except ImportError:
+    _WEBENGINE_AVAILABLE = False
 
 from agent.agent import AgentSession
 from agent.config import settings
@@ -42,6 +50,18 @@ from agent.ui.chat_html import (
 )
 from agent.ui.markdown_renderer import render_markdown
 from agent.ui.styles import COLORS, QSS
+from agent.ui.web_html import (
+    build_assistant_msg,
+    build_cancelled,
+    build_error,
+    build_event_html,
+    build_log,
+    build_streaming,
+    build_thinking,
+    build_tool_msg,
+    build_user_msg,
+    wrap_page,
+)
 from agent.ui.worker import AgentWorker
 from agent.ui.event_handler import DisplayState
 
@@ -83,6 +103,11 @@ class AIAgentWindow(QMainWindow):
         self._answer_rendered = False
         self._thinking_start_pos = 0
         self._thinking_end_pos = 0
+        self._thinking_id = ""
+        self._streaming_id = ""
+        self._chat_page_id = 0
+        self._chat_html_content = ""
+        self._chat_view = "textbrowser"
         self._uploaded_files: list[dict] = []
 
         self._setup_ui()
@@ -245,15 +270,30 @@ class AIAgentWindow(QMainWindow):
         welcome_layout.addLayout(chips_row)
         inner.addWidget(self._welcome, 1)
 
-        self._chat_text = QTextBrowser()
-        self._chat_text.setObjectName("ChatText")
-        self._chat_text.setOpenExternalLinks(True)
-        self._chat_text.setOpenLinks(True)
-        self._chat_text.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
-        self._chat_text.setReadOnly(True)
-        self._chat_text.setVisible(False)
-        self._chat_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._chat_text.customContextMenuRequested.connect(self._show_context_menu)
+        if _WEBENGINE_AVAILABLE:
+            self._chat_text = QWebEngineView()
+            self._chat_text.setObjectName("ChatText")
+            self._chat_text.setVisible(False)
+            self._chat_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self._chat_text.customContextMenuRequested.connect(self._show_context_menu)
+            self._chat_text.loadFinished.connect(self._on_load_finished)
+            self._chat_text.urlChanged.connect(self._on_url_changed)
+            self._chat_page_id = 0
+            self._chat_html_content = ""
+            self._chat_view = "webengine"
+            self._chat_text.setHtml(wrap_page(""), QUrl("file:///"))
+        else:
+            from PyQt6.QtWidgets import QTextBrowser
+            self._chat_text = QTextBrowser()
+            self._chat_text.setObjectName("ChatText")
+            self._chat_text.setOpenExternalLinks(True)
+            self._chat_text.setOpenLinks(True)
+            self._chat_text.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
+            self._chat_text.setReadOnly(True)
+            self._chat_text.setVisible(False)
+            self._chat_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self._chat_text.customContextMenuRequested.connect(self._show_context_menu)
+            self._chat_view = "textbrowser"
         inner.addWidget(self._chat_text, 1)
 
         self._chat_splitter.addWidget(container)
@@ -480,62 +520,141 @@ class AIAgentWindow(QMainWindow):
             self._welcome.setVisible(False)
             self._chat_text.setVisible(True)
 
+    def _reload_webengine(self) -> None:
+        if self._chat_view != "webengine":
+            return
+        html_content = wrap_page(self._chat_html_content)
+        self._chat_text.setHtml(html_content, QUrl("file:///"))
+
+    def _on_load_finished(self, ok: bool) -> None:
+        if ok and self._chat_view == "webengine":
+            self._chat_text.page().runJavaScript("scrollToBottom();")
+
+    def _on_url_changed(self, url: QUrl) -> None:
+        if self._chat_view == "webengine" and url.toString().startswith("http"):
+            QDesktopServices.openUrl(url)
+            self._chat_text.setHtml(wrap_page(self._chat_html_content), QUrl("file:///"))
+
+    def _chat_copy(self) -> None:
+        if self._chat_view == "webengine":
+            self._chat_text.page().runJavaScript("document.execCommand('copy');")
+        else:
+            self._chat_text.copy()
+
+    def _chat_select_all(self) -> None:
+        if self._chat_view == "webengine":
+            self._chat_text.page().runJavaScript("document.execCommand('selectAll');")
+        else:
+            self._chat_text.selectAll()
+
+    def _append_to_html(self, fragment: str) -> None:
+        if self._chat_view == "webengine":
+            self._chat_html_content += fragment
+        else:
+            self._chat_text.append(fragment)
+
     def _show_thinking_indicator(self) -> None:
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._thinking_start_pos = cursor.position()
-        self._chat_text.setTextCursor(cursor)
-        self._chat_text.insertHtml(thinking_html())
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._thinking_end_pos = cursor.position()
-        sb = self._chat_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        if self._chat_view == "webengine":
+            self._thinking_id = f"thinking_{self._chat_page_id}"
+            self._chat_page_id += 1
+            self._append_to_html(build_thinking(self._thinking_id))
+            self._reload_webengine()
+        else:
+            cursor = self._chat_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._thinking_start_pos = cursor.position()
+            self._chat_text.setTextCursor(cursor)
+            self._chat_text.insertHtml(thinking_html())
+            cursor = self._chat_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._thinking_end_pos = cursor.position()
+            sb = self._chat_text.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     def _remove_thinking_indicator(self) -> None:
-        if self._thinking_start_pos <= 0 or self._thinking_end_pos <= 0:
+        if self._chat_view == "webengine":
+            self._chat_html_content = re.sub(
+                r'<div class="msg-thinking"[^>]*>.*?</div>',
+                "", self._chat_html_content, flags=re.DOTALL
+            )
+            self._reload_webengine()
+        else:
+            if self._thinking_start_pos <= 0 or self._thinking_end_pos <= 0:
+                self._thinking_start_pos = 0
+                self._thinking_end_pos = 0
+                return
+            cursor = self._chat_text.textCursor()
+            cursor.setPosition(self._thinking_start_pos)
+            cursor.setPosition(self._thinking_end_pos, cursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
             self._thinking_start_pos = 0
             self._thinking_end_pos = 0
-            return
-        cursor = self._chat_text.textCursor()
-        cursor.setPosition(self._thinking_start_pos)
-        cursor.setPosition(self._thinking_end_pos, cursor.MoveMode.KeepAnchor)
-        cursor.removeSelectedText()
-        self._thinking_start_pos = 0
-        self._thinking_end_pos = 0
 
     def _start_streaming(self) -> None:
         self._streaming_active = True
         self._streaming_buffer = ""
         self._answer_rendered = False
         self._remove_thinking_indicator()
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._stream_start_pos = cursor.position()
-        self._chat_text.setTextCursor(cursor)
-        self._chat_text.insertHtml(
-            f'<div style="margin: 12px 0; text-align: left;">'
-            f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
-            f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
-            f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
-            f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px;">'
-        )
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._chat_text.setTextCursor(cursor)
+        if self._chat_view == "webengine":
+            self._streaming_id = f"streaming_{self._chat_page_id}"
+            self._chat_page_id += 1
+            self._append_to_html(build_streaming("", self._streaming_id))
+            self._reload_webengine()
+        else:
+            cursor = self._chat_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._stream_start_pos = cursor.position()
+            self._chat_text.setTextCursor(cursor)
+            self._chat_text.insertHtml(
+                f'<div style="margin: 12px 0; text-align: left;">'
+                f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+                f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+                f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+                f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px;">'
+            )
+            cursor = self._chat_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._chat_text.setTextCursor(cursor)
 
     def _append_streaming_token(self, token: str) -> None:
         self._streaming_buffer += token
-        escaped = html.escape(token)
-        cursor = self._chat_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self._chat_text.setTextCursor(cursor)
-        self._chat_text.insertHtml(escaped)
+        if self._chat_view == "webengine":
+            escaped = html.escape(self._streaming_buffer)
+            self._chat_html_content = re.sub(
+                rf'<div class="msg-streaming"[^>]*id="{re.escape(self._streaming_id)}"[^>]*>.*?</div>',
+                build_streaming(self._streaming_buffer, self._streaming_id),
+                self._chat_html_content, count=1, flags=re.DOTALL
+            )
+            b64 = base64.b64encode(escaped.encode("utf-8")).decode("ascii")
+            self._chat_text.page().runJavaScript(
+                f'var el=document.getElementById("{self._streaming_id}");'
+                f"if(el){{el.querySelector('.bubble').innerHTML=atob('{b64}')+\"<span class='cursor'></span>\";scrollToBottom();}}"
+            )
+        else:
+            escaped = html.escape(token)
+            cursor = self._chat_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self._chat_text.setTextCursor(cursor)
+            self._chat_text.insertHtml(escaped)
 
     def _end_streaming(self) -> None:
         if not self._streaming_active:
             return
         self._streaming_active = False
+        if self._chat_view == "webengine":
+            if self._streaming_id and self._streaming_id in self._chat_html_content:
+                final_html = build_streaming(self._streaming_buffer, self._streaming_id)
+                final_html = re.sub(r'<span class="cursor"></span>', '', final_html)
+                self._chat_html_content = re.sub(
+                    rf'<div class="msg-streaming"[^>]*id="{re.escape(self._streaming_id)}"[^>]*>.*?</div>',
+                    final_html,
+                    self._chat_html_content, count=1, flags=re.DOTALL
+                )
+                self._chat_text.page().runJavaScript(
+                    f'var el = document.getElementById("{self._streaming_id}");'
+                    f'if(el) {{ var c = el.querySelector(".cursor"); if(c) c.remove(); scrollToBottom(); }}'
+                )
+            return
         cursor = self._chat_text.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self._chat_text.setTextCursor(cursor)
@@ -544,27 +663,42 @@ class AIAgentWindow(QMainWindow):
         sb.setValue(sb.maximum())
 
     def _append_streaming_metadata(self) -> None:
-        # elapsed = self._display.elapsed
-        # tc = self._display.tool_count
-        # sec = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed // 60)}m{int(elapsed % 60)}s"
-        # cursor = self._chat_text.textCursor()
-        # cursor.movePosition(cursor.MoveOperation.End)
-        # self._chat_text.setTextCursor(cursor)
-        # self._chat_text.insertHtml(
-        #     f'<div style="margin-top: 6px; display: flex; gap: 16px; '
-        #     f'font-size: 11px; color: {COLORS["muted"]};">'
-        #     f'<span>⏱ {sec}</span>'
-        #     f'<span>🔧 {tc} 次工具调用</span>'
-        #     f'</div>'
-        # )
         pass
 
     def _append_html(self, html_str: str) -> None:
         if self._streaming_active:
             self._end_streaming()
-        self._chat_text.append(html_str)
-        sb = self._chat_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._append_to_html(html_str)
+        self._reload_webengine()
+
+    def _replace_streaming_with_answer(self, answer: str) -> None:
+        rendered = render_markdown(answer)
+        if self._chat_view == "webengine":
+            assistant_html = build_assistant_msg(rendered, self._streaming_id)
+            self._chat_html_content = re.sub(
+                rf'<div class="msg-streaming"[^>]*id="{re.escape(self._streaming_id)}"[^>]*>.*?</div>',
+                assistant_html, self._chat_html_content, count=1, flags=re.DOTALL
+            )
+            self._reload_webengine()
+        else:
+            html_str = (
+                f'<div style="margin: 12px 0; text-align: left;">'
+                f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+                f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+                f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+                f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
+                f'{rendered}'
+                f'</div></div></div>'
+            )
+            cursor = self._chat_text.textCursor()
+            cursor.setPosition(self._stream_start_pos)
+            cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.insertHtml(html_str)
+            self._answer_rendered = True
+            self._streaming_buffer = ""
+            sb = self._chat_text.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     def _set_status(self, text: str, running: bool = False) -> None:
         self._status_label.setText(text)
@@ -606,21 +740,29 @@ class AIAgentWindow(QMainWindow):
         self._input_box.setMinimumHeight(h)
 
     def _show_context_menu(self, pos) -> None:
-        cursor = self._chat_text.textCursor()
-        cursor.setPosition(self._chat_text.textCursor().position())
-        has_selection = cursor.hasSelection()
+        has_selection = False
+        if self._chat_view == "webengine":
+            self._chat_text.page().runJavaScript(
+                "document.getSelection().toString().length > 0",
+                lambda result: setattr(self, "_has_selection", bool(result))
+            )
+            has_selection = getattr(self, "_has_selection", False)
+        else:
+            cursor = self._chat_text.textCursor()
+            cursor.setPosition(self._chat_text.textCursor().position())
+            has_selection = cursor.hasSelection()
 
         menu = QMenu(self)
 
         copy_action = QAction("复制", self)
         copy_action.setEnabled(has_selection)
         copy_action.setShortcut(QKeySequence.StandardKey.Copy)
-        copy_action.triggered.connect(lambda: self._chat_text.copy())
+        copy_action.triggered.connect(self._chat_copy)
         menu.addAction(copy_action)
 
         select_all_action = QAction("全选", self)
         select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
-        select_all_action.triggered.connect(lambda: self._chat_text.selectAll())
+        select_all_action.triggered.connect(self._chat_select_all)
         menu.addAction(select_all_action)
 
         menu.addSeparator()
@@ -638,34 +780,19 @@ class AIAgentWindow(QMainWindow):
         menu.exec(self._chat_text.mapToGlobal(pos))
 
     def _copy_all_content(self) -> None:
-        all_text = self._chat_text.toPlainText()
-        if all_text:
-            QApplication.clipboard().setText(all_text)
+        if self._chat_view == "webengine":
+            self._chat_text.page().runJavaScript(
+                "document.body.innerText",
+                lambda result: QApplication.clipboard().setText(result or "")
+            )
+        else:
+            all_text = self._chat_text.toPlainText()
+            if all_text:
+                QApplication.clipboard().setText(all_text)
 
     # ------------------------------------------------------------------
     # Event → rendering dispatch (uses typed AgentEvent directly)
     # ------------------------------------------------------------------
-
-    def _replace_streaming_with_answer(self, answer: str) -> None:
-        rendered = render_markdown(answer)
-        html_str = (
-            f'<div style="margin: 12px 0; text-align: left;">'
-            f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
-            f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
-            f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
-            f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
-            f'{rendered}'
-            f'</div></div></div>'
-        )
-        cursor = self._chat_text.textCursor()
-        cursor.setPosition(self._stream_start_pos)
-        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
-        cursor.removeSelectedText()
-        cursor.insertHtml(html_str)
-        self._answer_rendered = True
-        self._streaming_buffer = ""
-        sb = self._chat_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
 
     def _render_event(self, event: AgentEvent) -> None:
         from agent.ui.event_handler import handle_event
@@ -695,27 +822,43 @@ class AIAgentWindow(QMainWindow):
             if had_streaming or self._streaming_buffer:
                 self._replace_streaming_with_answer(answer)
             else:
-                rendered = render_markdown(answer)
-                bubble = (
-                    f'<div style="margin: 12px 0; text-align: left;">'
-                    f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
-                    f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
-                    f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
-                    f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
-                    f'{rendered}'
-                    f'</div></div></div>'
-                )
-                self._append_html(bubble)
+                if self._chat_view == "webengine":
+                    rendered = render_markdown(answer)
+                    self._append_to_html(build_assistant_msg(rendered))
+                    self._reload_webengine()
+                else:
+                    rendered = render_markdown(answer)
+                    bubble = (
+                        f'<div style="margin: 12px 0; text-align: left;">'
+                        f'<div style="display: inline-block; background-color: {COLORS["assistant_bubble"]};'
+                        f'border: 1px solid {COLORS["border"]}; border-radius: 12px;'
+                        f'padding: 14px 18px; line-height: 1.7; max-width: 85%; text-align: left;">'
+                        f'<div class="md-body" style="color: {COLORS["text"]}; font-size: 14px; line-height: 1.7;">'
+                        f'{rendered}'
+                        f'</div></div></div>'
+                    )
+                    self._append_html(bubble)
                 self._answer_rendered = True
             return
 
         handle_event(self._display, event_dict)
-        html_fragment = event_to_html(event_dict)
-        if html_fragment:
-            self._append_html(html_fragment)
+        if self._chat_view == "webengine":
+            web_fragment = build_event_html(event_dict)
+            if web_fragment:
+                self._append_to_html(web_fragment)
+                self._reload_webengine()
+        else:
+            html_fragment = event_to_html(event_dict)
+            if html_fragment:
+                self._append_html(html_fragment)
 
     def _render_final(self, answer: str, elapsed: float, tc: int) -> None:
-        self._append_html(final_answer_html(answer, elapsed, tc))
+        if self._chat_view == "webengine":
+            rendered = render_markdown(answer)
+            self._append_to_html(build_assistant_msg(rendered))
+            self._reload_webengine()
+        else:
+            self._append_html(final_answer_html(answer, elapsed, tc))
 
     # ------------------------------------------------------------------
     # Actions
@@ -742,7 +885,11 @@ class AIAgentWindow(QMainWindow):
 
     def _submit_message(self, message: str) -> None:
         self._show_chat()
-        self._append_html(user_message_html(message))
+        if self._chat_view == "webengine":
+            self._append_to_html(build_user_msg(message))
+            self._reload_webengine()
+        else:
+            self._append_html(user_message_html(message))
         self._history.append({"role": "user", "content": message})
         self._start_agent(message)
 
@@ -760,7 +907,7 @@ class AIAgentWindow(QMainWindow):
         self._set_status("思考中...", running=True)
 
         self._worker = AgentWorker(self._session, message, self._history)
-        self._worker.event_bus.subscribe(self._render_event)
+        self._worker.progress_signal.connect(self._render_event)
         self._worker.result_signal.connect(self._on_result)
         self._worker.finished_signal.connect(self._on_finished)
         self._worker.error_signal.connect(self._on_error)
@@ -769,9 +916,17 @@ class AIAgentWindow(QMainWindow):
 
     def _on_result(self, result: AgentResult) -> None:
         if result.status == AgentStatus.CANCELLED:
-            self._append_html(cancelled_html())
+            if self._chat_view == "webengine":
+                self._append_to_html(build_cancelled())
+                self._reload_webengine()
+            else:
+                self._append_html(cancelled_html())
         elif result.status == AgentStatus.FAILED:
-            self._append_html(error_html(f"  ❌ {result.content}"))
+            if self._chat_view == "webengine":
+                self._append_to_html(build_error(f"  ❌ {result.content}"))
+                self._reload_webengine()
+            else:
+                self._append_html(error_html(f"  ❌ {result.content}"))
         elif result.status == AgentStatus.PARTIAL:
             self._render_final(result.content, result.elapsed, len(result.tool_calls))
         else:
@@ -829,7 +984,11 @@ class AIAgentWindow(QMainWindow):
                 self._worker = None
             return
 
-        self._append_html(error_html(f"  ❌ Error: {error_msg}"))
+        if self._chat_view == "webengine":
+            self._append_to_html(build_error(f"  ❌ Error: {error_msg}"))
+            self._reload_webengine()
+        else:
+            self._append_html(error_html(f"  ❌ Error: {error_msg}"))
         self._set_buttons_state(False)
         self._input_box.setFocus()
         self._set_status("就绪")
@@ -849,7 +1008,11 @@ class AIAgentWindow(QMainWindow):
             self._worker.cancel()
             QTimer.singleShot(5000, self._force_cleanup_if_needed)
         self._stop_requested = True
-        self._append_html(cancelled_html())
+        if self._chat_view == "webengine":
+            self._append_to_html(build_cancelled())
+            self._reload_webengine()
+        else:
+            self._append_html(cancelled_html())
         self._is_running = False
         self._set_buttons_state(False)
         self._input_box.setFocus()
@@ -872,7 +1035,7 @@ class AIAgentWindow(QMainWindow):
     def _on_clear(self) -> None:
         if self._is_running:
             self._on_stop()
-        self._chat_text.clear()
+        self._clear_chat_display()
         self._welcome.setVisible(True)
         self._chat_text.setVisible(False)
         self._history = []
@@ -883,6 +1046,8 @@ class AIAgentWindow(QMainWindow):
         self._answer_rendered = False
         self._reset_stats()
         self._clear_file_chips()
+        self._chat_page_id = 0
+        self._streaming_id = ""
 
     def _ensure_uploads_dir(self) -> str:
         uploads_dir = os.path.join(os.path.realpath(settings.FILE_READER_ROOT), "uploads")

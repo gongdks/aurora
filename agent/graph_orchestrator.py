@@ -295,7 +295,7 @@ class GraphOrchestrator:
         executor = self._get_or_build_executor(scene)
 
         tracker = _BaseToolEventTracker(self._progress_cb)
-        streaming_handler = StreamingCallbackHandler(self._progress_cb)
+        streaming_handler = StreamingCallbackHandler(self._progress_cb, cancel_event=self._cancel_event)
 
         result = run_react_step(
             executor,
@@ -769,8 +769,8 @@ Respond with numbered steps only."""
     # LLM helpers
     # ------------------------------------------------------------------
 
-    def _stream_llm_response(self, prompt: str) -> str:
-        """Stream LLM response, emitting tokens via progress_callback."""
+    def _stream_llm_response(self, prompt: str, emit_tokens: bool = False) -> str:
+        """Stream LLM response, optionally emitting tokens via progress_callback."""
         collected: list[str] = []
         token_count = 0
         try:
@@ -781,7 +781,7 @@ Respond with numbered steps only."""
                 if token:
                     collected.append(token)
                     token_count += 1
-                    if self._progress_cb:
+                    if emit_tokens and self._progress_cb:
                         self._progress_cb(make_streaming_token(token))
         except Exception:
             pass

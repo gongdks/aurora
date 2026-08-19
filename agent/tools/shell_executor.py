@@ -55,6 +55,28 @@ _ALLOWED_COMMANDS_HINT = (
     "pip list, pip install, python -c, 等"
 )
 
+_CLEANED_ENV_CACHE: dict[str, str] | None = None
+
+
+def _get_clean_env() -> dict[str, str]:
+    global _CLEANED_ENV_CACHE
+    if _CLEANED_ENV_CACHE is not None:
+        return _CLEANED_ENV_CACHE
+
+    env = os.environ.copy()
+    path_val = env.get("PATH", "")
+    if path_val:
+        cleaned = []
+        for p in path_val.split(os.pathsep):
+            p = p.strip().strip('"')
+            if p and os.path.isdir(p):
+                cleaned.append(p)
+        if cleaned:
+            env["PATH"] = os.pathsep.join(cleaned)
+    env["PYTHONHASHSEED"] = "0"
+    _CLEANED_ENV_CACHE = env
+    return env
+
 
 def _check_command_safety(command: str) -> str | None:
     """Pre-check command for dangerous patterns. Returns error message or None."""
@@ -123,10 +145,7 @@ def shell_executor(command: str, timeout: int = 30) -> str:
             text=True,
             timeout=timeout,
             cwd=root,
-            env={
-                **os.environ,
-                "PYTHONHASHSEED": "0",
-            },
+            env=_get_clean_env(),
         )
 
         return _format_output(result.stdout, result.stderr, result.returncode)
@@ -165,7 +184,7 @@ def shell_executor_multi(commands: str, timeout: int = 60) -> str:
                 text=True,
                 timeout=timeout,
                 cwd=root,
-                env={**os.environ, "PYTHONHASHSEED": "0"},
+                env=_get_clean_env(),
             )
             output = _format_output(result.stdout, result.stderr, result.returncode)
             parts.append(f"$ {cmd}\n{output}")

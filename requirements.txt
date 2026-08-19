@@ -11,6 +11,7 @@ langgraph>=0.2.0
 
 # GUI
 PyQt6>=6.6.0
+PyQt6-WebEngine>=6.6.0
 
 # Search
 duckduckgo-search>=6.0.0

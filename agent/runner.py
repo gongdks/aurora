@@ -118,12 +118,19 @@ class StreamingCallbackHandler(BaseCallbackHandler):
     STREAMING_TOKEN progress events so the UI can render them in near-real-time.
     """
 
-    def __init__(self, progress_callback: Callable[[dict[str, Any]], None] | None) -> None:
+    def __init__(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         super().__init__()
         self._cb = progress_callback
         self._buffer: list[str] = []
+        self._cancel_event = cancel_event
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        if self._cancel_event and self._cancel_event.is_set():
+            raise CancelledError("Stream cancelled by user")
         if self._cb:
             self._cb(make_streaming_token(token))
 

@@ -53,6 +53,7 @@ class AgentWorker(QThread):
     result_signal = pyqtSignal(object)
     finished_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -72,7 +73,7 @@ class AgentWorker(QThread):
             start_time = __import__("time").time()
 
             def _progress_cb(event: dict[str, Any]) -> None:
-                self.event_bus.emit(event)
+                self.progress_signal.emit(event)
 
             answer = self._session.invoke(
                 self._message,
