@@ -1,13 +1,7 @@
-"""Write and edit local files.
+"""Write, edit, and manage local files.
 
-Provides file writing (create/overwrite) and file editing (replace content).
+Provides file writing, editing, and management (delete/copy/move/rename/mkdir).
 Paths are resolved relative to the configured root directory.
-
-Editing tools:
-  - file_writer: create or overwrite entire files
-  - file_editor: replace first occurrence of old_text with new_text
-  - file_editor_all: replace ALL occurrences of old_text with new_text
-  - file_editor_exact: exact string replacement (must match including whitespace/indent)
 """
 
 import os
@@ -206,6 +200,131 @@ def file_list(directory: str = ".") -> str:
         return f"Path error: {exc}"
     except OSError as exc:
         return f"List failed: {exc}"
+
+
+@register
+@tool
+def file_delete(filename: str) -> str:
+    """删除项目目录内的文件。
+
+    仅支持删除文件，不支持删除目录。
+
+    Args:
+        filename: 要删除的文件路径，如 "output/old_report.txt"
+    """
+    try:
+        safe = safe_resolve(filename, settings.FILE_READER_ROOT)
+        if not os.path.isfile(safe):
+            return f"❌ 文件不存在：{filename}"
+        os.remove(safe)
+        return f"✅ 已删除文件：{filename}"
+    except ValueError as exc:
+        return f"路径错误：{exc}"
+    except OSError as exc:
+        return f"删除失败：{exc}"
+
+
+@register
+@tool
+def file_copy(source: str, destination: str) -> str:
+    """复制项目目录内的文件。
+
+    Args:
+        source: 源文件路径，如 "data/original.csv"
+        destination: 目标路径，如 "data/backup.csv"
+    """
+    import shutil
+
+    try:
+        src = safe_resolve(source, settings.FILE_READER_ROOT)
+        dst = safe_resolve(destination, settings.FILE_READER_ROOT)
+        if not os.path.isfile(src):
+            return f"❌ 源文件不存在：{source}"
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(src, dst)
+        size = os.path.getsize(dst)
+        return f"✅ 已复制：{source} → {destination}（{_fmt_size(size)}）"
+    except ValueError as exc:
+        return f"路径错误：{exc}"
+    except OSError as exc:
+        return f"复制失败：{exc}"
+
+
+@register
+@tool
+def file_move(source: str, destination: str) -> str:
+    """移动项目目录内的文件（重命名或改变目录）。
+
+    Args:
+        source: 源文件路径，如 "data/old.csv"
+        destination: 目标路径，如 "archive/old.csv"
+    """
+    import shutil
+
+    try:
+        src = safe_resolve(source, settings.FILE_READER_ROOT)
+        dst = safe_resolve(destination, settings.FILE_READER_ROOT)
+        if not os.path.exists(src):
+            return f"❌ 源路径不存在：{source}"
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.move(src, dst)
+        return f"✅ 已移动：{source} → {destination}"
+    except ValueError as exc:
+        return f"路径错误：{exc}"
+    except OSError as exc:
+        return f"移动失败：{exc}"
+
+
+@register
+@tool
+def dir_create(path: str) -> str:
+    """创建目录（支持多级创建）。
+
+    Args:
+        path: 目录路径，如 "output/reports/2024"
+    """
+    try:
+        safe = safe_resolve(path, settings.FILE_READER_ROOT)
+        if os.path.exists(safe):
+            if os.path.isdir(safe):
+                return f"✅ 目录已存在：{path}"
+            else:
+                return f"❌ 同名文件已存在：{path}"
+        os.makedirs(safe, exist_ok=True)
+        return f"✅ 已创建目录：{path}"
+    except ValueError as exc:
+        return f"路径错误：{exc}"
+    except OSError as exc:
+        return f"创建目录失败：{exc}"
+
+
+@register
+@tool
+def dir_delete(path: str) -> str:
+    """删除项目目录内的空目录。
+
+    仅支持删除空目录。如需删除含文件的目录，请先删除目录中的文件。
+
+    Args:
+        path: 要删除的目录路径，如 "output/empty_dir"
+    """
+    try:
+        safe = safe_resolve(path, settings.FILE_READER_ROOT)
+        if not os.path.isdir(safe):
+            return f"❌ 目录不存在：{path}"
+        entries = os.listdir(safe)
+        if entries:
+            return f"❌ 目录不为空（含 {len(entries)} 个条目），请先删除其中的文件"
+        os.rmdir(safe)
+        return f"✅ 已删除空目录：{path}"
+    except ValueError as exc:
+        return f"路径错误：{exc}"
+    except OSError as exc:
+        return f"删除目录失败：{exc}"
 
 
 def _fmt_size(size: int) -> str:

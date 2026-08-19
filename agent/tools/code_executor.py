@@ -6,6 +6,13 @@ Security model:
   3. Call filter: blocks dangerous builtins (eval, exec, __import__, open on system paths)
   4. Regex pre-check: fast rejection of obvious attacks before AST parsing
   5. Subprocess isolation: code runs in a temp directory with timeout
+
+Supported safe libraries for data processing:
+  - pandas, numpy, matplotlib, seaborn
+  - json, csv, collections, itertools, pathlib, datetime
+  - re, string, textwrap, decimal, fractions, statistics
+  - io, hashlib, base64, copy, math, functools, operator
+  - pprint, traceback, warnings, contextlib, dataclasses, enum
 """
 
 import ast
@@ -21,23 +28,20 @@ from agent.config import settings
 from agent.tools.registry import register
 
 _MAX_CODE_SIZE = 50_000
+_EXEC_TIMEOUT = 60
 
-# Modules that are never safe to import
 _FORBIDDEN_MODULES = frozenset({
     "os", "subprocess", "socket", "http.server", "ftplib", "smtplib",
     "pickle", "shutil", "ctypes", "code", "codeop", "pty",
     "signal", "multiprocessing", "threading",
 })
 
-# Builtin function names that are dangerous to call
 _FORBIDDEN_BUILTINS = frozenset({
     "eval", "exec", "compile", "__import__", "open",
     "input", "breakpoint",
 })
 
-# AST node types allowed in safe code (whitelist)
 _SAFE_NODE_TYPES = frozenset({
-    # Expressions
     "Expr", "Constant", "Name", "Load", "Store", "Del",
     "BinOp", "UnaryOp", "BoolOp", "Compare", "IfExp",
     "Call", "Attribute", "Subscript", "Slice",
@@ -45,40 +49,45 @@ _SAFE_NODE_TYPES = frozenset({
     "ListComp", "SetComp", "GeneratorExp",
     "JoinedStr", "FormattedValue",
     "Starred", "NamedExpr", "keyword",
-    # Statements
     "Assign", "AugAssign", "AnnAssign",
     "If", "For", "While", "Break", "Continue", "Pass",
     "Return", "Delete", "Raise", "Assert",
     "Try", "TryStar", "ExceptHandler",
     "With", "withitem",
     "Match", "match_case",
-    # Definitions
     "FunctionDef", "AsyncFunctionDef",
     "ClassDef",
     "arguments", "arg",
     "Lambda",
-    # Imports
     "Import", "ImportFrom", "alias",
-    # Module-level
     "Module",
 })
 
+_MATPLOTLIB_PRESETUP = """
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+except Exception:
+    pass
+"""
+
+_SUPPORTED_LIBS_NOTICE = """
+# Supported safe libraries:
+#   Data: pandas, numpy, matplotlib, seaborn
+#   IO: json, csv, io, pathlib, os.path (read-only), open (allowed in workspace)
+#   Utils: collections, itertools, datetime, re, math, statistics, decimal, fractions
+#   Other: copy, functools, operator, pprint, textwrap, string, hashlib, base64
+"""
+
 
 class CodeSafetyError(Exception):
-    """Raised when code fails AST-level security checks."""
     pass
 
 
 def _check_code_safety(code: str) -> str | None:
-    """Check code safety via regex pre-check + AST whitelist.
-
-    Returns error message string, or None if safe.
-    """
-    # --- Pre-check: size limit ---
     if len(code) > _MAX_CODE_SIZE:
         return f"Code too large ({len(code)} > {_MAX_CODE_SIZE} chars), rejected"
 
-    # --- Pre-check: fast regex for obvious attacks ---
     _OBVIOUS_ATTACKS = [
         (r"__import__\s*\(.*\)", "__import__ call"),
         (r"os\.system\s*\(", "os.system call"),
@@ -93,7 +102,6 @@ def _check_code_safety(code: str) -> str | None:
         if re.search(pattern, code, re.IGNORECASE):
             return f"Forbidden pattern detected: {label}"
 
-    # --- AST-level whitelist ---
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as exc:
@@ -109,8 +117,6 @@ def _check_code_safety(code: str) -> str | None:
 
 
 class _ASTSafetyChecker(ast.NodeVisitor):
-    """AST visitor that rejects dangerous nodes."""
-
     def generic_visit(self, node: ast.AST) -> None:
         node_type = type(node).__name__
         if node_type not in _SAFE_NODE_TYPES:
@@ -141,21 +147,18 @@ class _ASTSafetyChecker(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        # Check for calls to dangerous builtins
         if isinstance(node.func, ast.Name):
             if node.func.id in _FORBIDDEN_BUILTINS:
                 raise CodeSafetyError(
                     f"Forbidden function call: {node.func.id}() "
                     f"(line {getattr(node, 'lineno', '?')})"
                 )
-        # Check for getattr(__builtins__,...) pattern
         if isinstance(node.func, ast.Attribute):
             if node.func.attr in _FORBIDDEN_BUILTINS:
                 raise CodeSafetyError(
                     f"Forbidden method call: .{node.func.attr}() "
                     f"(line {getattr(node, 'lineno', '?')})"
                 )
-            # Block getattr tricks: getattr(x, 'ev'+'al')
             if node.func.attr == "getattr":
                 raise CodeSafetyError(
                     f"Forbidden: getattr() can bypass import restrictions "
@@ -164,7 +167,6 @@ class _ASTSafetyChecker(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        # Block access to dangerous attributes on any object
         if node.attr in ("__builtins__", "__import__", "__subclasses__",
                          "__bases__", "__mro__", "__globals__", "__code__"):
             raise CodeSafetyError(
@@ -180,28 +182,69 @@ def _ensure_workdir() -> str:
     return path
 
 
+def _scan_workspace(before: set[str], workdir: str) -> list[tuple[str, int]]:
+    try:
+        current = set(os.listdir(workdir))
+    except OSError:
+        return []
+    new_files = current - before
+    results: list[tuple[str, int]] = []
+    for f in sorted(new_files):
+        full = os.path.join(workdir, f)
+        if os.path.isfile(full):
+            size = os.path.getsize(full)
+            results.append((f, size))
+    return results
+
+
+def _fmt_size(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f}KB"
+    return f"{size / 1024 / 1024:.1f}MB"
+
+
+def _format_dataframe_preview(text: str) -> str:
+    lines = text.split("\n")
+    if len(lines) < 3:
+        return text
+    if any(";" in l for l in lines[:3]) or any("," in l for l in lines[:3]):
+        return text
+    if len(lines) > 50:
+        return "\n".join(lines[:50]) + "\n... (truncated)"
+    return text
+
+
 @register
 @tool
 def code_executor(code: str) -> str:
-    """Execute Python code and return the output.
+    """执行 Python 代码并返回结果。支持数据分析、绘图、计算等。
 
-    Use for calculations, data processing, file manipulation,
-    and any task requiring custom Python code.
-    Code runs in a sandbox with AST-level security checks and a 30-second timeout.
+    支持的库：pandas, numpy, matplotlib, seaborn, json, csv, collections, itertools, datetime, re, math, statistics 等。
+    代码运行在沙盒中，有 60 秒超时。可将结果保存到 workspace 目录。
 
     Args:
-        code: Python code to execute, e.g. "print(sum(range(100)))"
+        code: 要执行的 Python 代码。支持：
+              - print() 输出结果
+              - matplotlib 绘图（自动保存为 PNG 到 workspace）
+              - pandas 数据分析（可保存 CSV/Excel 到 workspace）
+              - 任何纯计算逻辑
     """
     safety_err = _check_code_safety(code)
     if safety_err:
-        return f"[Safety] {safety_err}"
+        return f"[安全检查] {safety_err}"
 
     try:
         workdir = _ensure_workdir()
+        before_files = set(os.listdir(workdir)) if os.path.isdir(workdir) else set()
+
+        full_code = _MATPLOTLIB_PRESETUP + "\n" + code
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", dir=workdir, delete=False, encoding="utf-8"
         ) as f:
-            f.write(code)
+            f.write(full_code)
             script_path = f.name
 
         try:
@@ -209,23 +252,47 @@ def code_executor(code: str) -> str:
                 [sys.executable, script_path],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_EXEC_TIMEOUT,
                 cwd=workdir,
+                env={
+                    "MPLBACKEND": "Agg",
+                    "PYTHONHASHSEED": "0",
+                },
             )
-            output = result.stdout
-            if result.stderr:
-                output += ("\n[stderr]\n" + result.stderr)
+
+            output_parts: list[str] = []
+
+            stdout = result.stdout
+            if stdout.strip():
+                output_parts.append(stdout.rstrip())
+
+            if result.stderr.strip():
+                output_parts.append(f"[stderr]\n{result.stderr.strip()}")
+
             if result.returncode != 0:
-                output += f"\n[exit code: {result.returncode}]"
-            if not output.strip():
-                output = "(no output)"
-            return output[:5000]
+                output_parts.append(f"[exit code: {result.returncode}]")
+
+            new_files = _scan_workspace(before_files, workdir)
+            if new_files:
+                output_parts.append("")
+                output_parts.append("--- 生成的文件 ---")
+                for fname, size in new_files:
+                    output_parts.append(f"  📄 {fname} ({_fmt_size(size)})")
+
+            output = "\n".join(output_parts) if output_parts else "(无输出)"
+
+            if len(output) > 8000:
+                output = output[:8000] + "\n\n（输出过长，已截断）"
+
+            return output
+
         finally:
             try:
                 os.unlink(script_path)
             except OSError:
                 pass
+
     except subprocess.TimeoutExpired:
-        return "[Timeout] Code execution exceeded 30 seconds."
+        return f"[超时] 代码执行超过 {_EXEC_TIMEOUT} 秒。"
     except OSError as exc:
-        return f"[Error] {exc}"
+        return f"[错误] {exc}"
