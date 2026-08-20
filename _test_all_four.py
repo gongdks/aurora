@@ -595,6 +595,120 @@ try:
 except Exception as e:
     t("Team: 边界不崩", False)
 
+# --- 核心新特性: System Prompt → System Message 注入 ---
+import inspect as _inspect
+_src_exec = _inspect.getsource(BaseAgentRole._build_role_executor)
+_src_prompt = _inspect.getsource(BaseAgentRole._build_prompt)
+t("SystemPrompt: 使用 ChatPromptTemplate", "ChatPromptTemplate" in _src_exec)
+t("SystemPrompt: system message 分离", '"system"' in _src_exec)
+t("SystemPrompt: _system_prompt 注入模板", 'self._system_prompt' in _src_exec)
+t("SystemPrompt: 不再拼接到 human text", 'self._system_prompt' not in _src_prompt)
+t("SystemPrompt: tool_names 注入 system", 'tool_names' in _src_exec)
+
+# --- 核心新特性: 角色间上下文链式传递 ---
+r_ctx = ResearcherRole()
+r_ctx.receive_role_result("researcher", {"result": "找到AI论文", "status": "completed"})
+t("Chain: receive_role_result 存储结果", "researcher" in r_ctx._shared_results)
+t("Chain: context 注入 from_researcher", "from_researcher" in r_ctx._context)
+t("Chain: context 注入 researcher_status", "researcher_status" in r_ctx._context)
+t("Chain: get_shared_results 返回副本", "researcher" in r_ctx.get_shared_results())
+
+a_ctx = AnalystRole()
+a_ctx.receive_role_result("researcher", {"result": "研究结果", "status": "completed"})
+t("Chain: Analyst 接收 Researcher 结果", "researcher" in a_ctx._shared_results)
+t("Chain: Analyst context 含前序结果", "from_researcher" in a_ctx._context)
+
+# --- 核心新特性: 角色专属 System Prompt ---
+t("RolePrompt: Researcher ≠ Analyst", ResearcherRole._system_prompt != AnalystRole._system_prompt)
+t("RolePrompt: Researcher ≠ Executor", ResearcherRole._system_prompt != ExecutorRole._system_prompt)
+t("RolePrompt: Analyst ≠ Executor", AnalystRole._system_prompt != ExecutorRole._system_prompt)
+t("RolePrompt: Coordinator 有专属 prompt", len(CoordinatorRole._system_prompt) > 20)
+t("RolePrompt: Researcher 含研究关键词", "研究" in ResearcherRole._system_prompt)
+t("RolePrompt: Analyst 含分析关键词", "分析" in AnalystRole._system_prompt)
+t("RolePrompt: Executor 含执行关键词", "执行" in ExecutorRole._system_prompt)
+
+# --- 核心新特性: 场景化工具路由 ---
+from agent.tools.registry import SCENE_TAGS
+t("Scene: research 场景定义", "research" in SCENE_TAGS)
+t("Scene: analysis 场景定义", "analysis" in SCENE_TAGS)
+t("Scene: execution 场景定义", "execution" in SCENE_TAGS)
+t("Scene: research 含 web 工具", "web" in SCENE_TAGS.get("research", set()))
+t("Scene: analysis 含 code 工具", "code" in SCENE_TAGS.get("analysis", set()))
+t("Scene: execution 含 shell 工具", "shell" in SCENE_TAGS.get("execution", set()))
+t("Scene: execution 含 git 工具", "git" in SCENE_TAGS.get("execution", set()))
+
+r_scene = ResearcherRole()
+a_scene = AnalystRole()
+e_scene = ExecutorRole()
+t("Scene: Researcher._scene = research", r_scene._scene == "research")
+t("Scene: Analyst._scene = analysis", a_scene._scene == "analysis")
+t("Scene: Executor._scene = execution", e_scene._scene == "execution")
+
+# --- 核心新特性: 合成策略选择 (LLM vs 模板) ---
+c5 = CoordinatorRole()
+synth_template = c5._synthesize_via_template("测试任务", [
+    {"role": "researcher", "result": "研究完成", "status": "completed"},
+    {"role": "analyst", "result": "分析完成", "status": "completed"},
+])
+t("Synth: 模板合成 method=template", synth_template["synthesis_method"] == "template")
+t("Synth: 模板合成含 participating_roles", "researcher" in synth_template.get("participating_roles", []))
+t("Synth: 模板合成 success_count=2", synth_template["success_count"] == 2)
+t("Synth: 模板合成 total_count=2", synth_template["total_count"] == 2)
+
+# 有 LLM 时走 LLM 合成 (mock LLM)
+class MockLLM:
+    def invoke(self, prompt):
+        class Resp:
+            content = "综合结果：研究和分析均已完成，结论是AI发展迅速。"
+        return Resp()
+
+c5_llm = CoordinatorRole(llm=MockLLM())
+synth_llm = c5_llm._synthesize("测试", [{"role": "researcher", "result": "ok"}])
+t("Synth: 有LLM时选LLM合成", synth_llm["synthesis_method"] == "llm")
+t("Synth: LLM合成含 synthesized_result", len(synth_llm.get("synthesized_result", "")) > 10)
+
+# 无 LLM 时走模板合成
+c5_no_llm = CoordinatorRole()
+synth_no = c5_no_llm._synthesize("测试", [{"role": "researcher", "result": "ok"}])
+t("Synth: 无LLM时选模板合成", synth_no["synthesis_method"] == "template")
+
+# LLM 失败时 fallback 模板
+class FailLLM:
+    def invoke(self, prompt):
+        raise RuntimeError("LLM unavailable")
+
+c5_fail = CoordinatorRole(llm=FailLLM())
+synth_fb = c5_fail._synthesize("测试", [{"role": "researcher", "result": "ok"}])
+t("Synth: LLM失败 fallback 模板", synth_fb["synthesis_method"] == "template")
+
+# --- 核心新特性: 结果自动传播 ---
+team3 = create_default_team()
+a3 = team3._roles["analyst"]
+team3._propagate_result_to_others("researcher", {"result": "研究完成", "status": "completed"})
+t("Propagate: Analyst 收到 Researcher 结果", "researcher" in a3._shared_results)
+t("Propagate: Analyst context 含 from_researcher", "from_researcher" in a3._context)
+
+team3._propagate_result_to_others("analyst", {"result": "分析完成", "status": "completed"})
+e3 = team3._roles["executor"]
+t("Propagate: Executor 收到 Analyst 结果", "analyst" in e3._shared_results)
+t("Propagate: Executor 收到 Researcher 结果", "researcher" in e3._shared_results)
+
+# --- 核心新特性: shared_router 共享 ---
+from agent.tools.registry import ToolRouter
+router = ToolRouter()
+team4 = create_default_team(shared_router=router)
+t("Router: Coordinator 使用共享 router", team4._router is router)
+t("Router: Researcher 使用共享 router", team4._roles["researcher"]._router is router)
+t("Router: Analyst 使用共享 router", team4._roles["analyst"]._router is router)
+t("Router: Executor 使用共享 router", team4._roles["executor"]._router is router)
+
+# --- 核心新特性: 协作端到端 (含上下文链) ---
+team5 = create_default_team()
+team5._roles["researcher"].receive_role_result("prev", {"result": "前置资料", "status": "completed"})
+e2e_chain = team5.execute("研究分析生成")
+t("E2EChain: 成功执行", e2e_chain["success_count"] == e2e_chain["total_count"])
+t("E2EChain: 合成含多角色", len(e2e_chain.get("participating_roles", [])) >= 2)
+
 print(f"  ① 多 Agent: {PASS} passed")
 
 

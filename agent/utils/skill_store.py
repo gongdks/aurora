@@ -44,6 +44,8 @@ class SkillDefinition:
     created_at: float = 0.0
     updated_at: float = 0.0
     skill_id: str = ""
+    tool_schemas: list[dict[str, Any]] = field(default_factory=list)
+    semantic_vector: list[float] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.skill_id:
@@ -69,6 +71,7 @@ class SkillDefinition:
             "description": self.description,
             "trigger_patterns": self.trigger_patterns,
             "tool_sequence": self.tool_sequence,
+            "tool_schemas": self.tool_schemas,
             "confidence": self.confidence,
             "usage_count": self.usage_count,
             "success_count": self.success_count,
@@ -86,6 +89,7 @@ class SkillDefinition:
             description=data.get("description", ""),
             trigger_patterns=data.get("trigger_patterns", []),
             tool_sequence=data.get("tool_sequence", []),
+            tool_schemas=data.get("tool_schemas", []),
             confidence=data.get("confidence", 0.5),
             usage_count=data.get("usage_count", 0),
             success_count=data.get("success_count", 0),
@@ -119,6 +123,8 @@ class SkillStore:
                     description TEXT,
                     trigger_patterns TEXT,
                     tool_sequence TEXT,
+                    tool_schemas TEXT DEFAULT '[]',
+                    semantic_vector TEXT DEFAULT '[]',
                     confidence REAL DEFAULT 0.5,
                     usage_count INTEGER DEFAULT 0,
                     success_count INTEGER DEFAULT 0,
@@ -131,7 +137,24 @@ class SkillStore:
             self._conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name)
             """)
+            self._migrate_schema()
             self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add missing columns for forward-compatible schema evolution."""
+        existing_cols = self._get_table_columns("skills")
+        if "tool_schemas" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE skills ADD COLUMN tool_schemas TEXT DEFAULT '[]'"
+            )
+        if "semantic_vector" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE skills ADD COLUMN semantic_vector TEXT DEFAULT '[]'"
+            )
+
+    def _get_table_columns(self, table: str) -> set[str]:
+        cursor = self._conn.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in cursor.fetchall()}
 
     def save(self, skill: SkillDefinition) -> None:
         skill.updated_at = time.time()
@@ -139,13 +162,16 @@ class SkillStore:
             self._conn.execute("""
                 INSERT OR REPLACE INTO skills
                 (skill_id, name, description, trigger_patterns, tool_sequence,
+                 tool_schemas, semantic_vector,
                  confidence, usage_count, success_count, failure_count, version,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 skill.skill_id, skill.name, skill.description,
                 json.dumps(skill.trigger_patterns, ensure_ascii=False),
                 json.dumps(skill.tool_sequence, ensure_ascii=False),
+                json.dumps(skill.tool_schemas, ensure_ascii=False),
+                json.dumps(skill.semantic_vector, ensure_ascii=False),
                 skill.confidence, skill.usage_count,
                 skill.success_count, skill.failure_count,
                 skill.version, skill.created_at, skill.updated_at,
@@ -204,6 +230,52 @@ class SkillStore:
         results.sort(key=lambda s: s.confidence, reverse=True)
         return results
 
+    def semantic_search(
+        self, query: str, top_k: int = 5, threshold: float = 0.3
+    ) -> list[tuple[SkillDefinition, float]]:
+        """Find skills via semantic similarity (Embedding + cosine).
+
+        Falls back gracefully: if embeddings are unavailable, returns
+        an empty list and the caller should use keyword matching.
+
+        Returns list of (skill, similarity_score) sorted by score desc.
+        """
+        try:
+            from agent.llm.embeddings import get_embedding_provider, cosine_similarity
+        except ImportError:
+            return []
+
+        provider = get_embedding_provider()
+        query_vec = provider.embed(query)
+        if not query_vec:
+            return []
+
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM skills").fetchall()
+
+        candidates: list[tuple[SkillDefinition, float]] = []
+        for row in rows:
+            skill = self._row_to_skill(row)
+            if not skill.is_reliable:
+                continue
+            if skill.semantic_vector:
+                score = cosine_similarity(query_vec, skill.semantic_vector)
+            else:
+                score = 0.0
+            if score >= threshold:
+                candidates.append((skill, score))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[:top_k]
+
+    def update_semantic_vector(self, skill_id: str, vector: list[float]) -> None:
+        """Update the semantic vector for a skill (used by rebuild_index)."""
+        skill = self.get(skill_id)
+        if skill is None:
+            return
+        skill.semantic_vector = vector
+        self.save(skill)
+
     def update_stats(
         self, skill_id: str, success: bool = True
     ) -> SkillDefinition | None:
@@ -244,12 +316,21 @@ class SkillStore:
         return removed
 
     def _row_to_skill(self, row: sqlite3.Row) -> SkillDefinition:
+        semantic_vec = []
+        try:
+            semantic_raw = row["semantic_vector"]
+            if semantic_raw:
+                semantic_vec = json.loads(semantic_raw)
+        except (KeyError, json.JSONDecodeError):
+            pass
         return SkillDefinition(
             skill_id=row["skill_id"],
             name=row["name"],
             description=row["description"] or "",
             trigger_patterns=json.loads(row["trigger_patterns"] or "[]"),
             tool_sequence=json.loads(row["tool_sequence"] or "[]"),
+            tool_schemas=json.loads(row["tool_schemas"] or "[]"),
+            semantic_vector=semantic_vec,
             confidence=row["confidence"],
             usage_count=row["usage_count"],
             success_count=row["success_count"],

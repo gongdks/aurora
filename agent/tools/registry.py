@@ -40,6 +40,7 @@ SCENE_TAGS: dict[str, set[str]] = {
     "dev": {"core", "dev", "git", "shell"},
     "analysis": {"core", "code", "file"},
     "research": {"core", "web", "summarize", "translate"},
+    "execution": {"core", "file", "code", "dev", "git", "shell"},
 }
 
 
@@ -174,6 +175,11 @@ def _discover_tool_modules() -> None:
 
     Each module's @register decorators will execute on import,
     automatically populating _TOOLS.
+
+    KeyboardInterrupt/SystemExit during import are treated as
+    environment-level issues (e.g. antivirus scanning) and logged
+    at DEBUG level rather than WARNING, since they don't reflect
+    actual code defects.
     """
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_pkg = "agent.tools"
@@ -189,6 +195,10 @@ def _discover_tool_modules() -> None:
             importlib.import_module(f".{module_name}", parent_pkg)
             _DISCOVERED.add(module_name)
             logger.info("Auto-loaded tool module: %s", module_name)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            logger.debug(
+                "Skipping tool module %s (interrupted: %s)", module_name, exc
+            )
         except Exception as exc:
             logger.warning("Failed to load tool module %s: %s", module_name, exc)
 
