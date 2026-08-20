@@ -123,9 +123,10 @@ class SQLiteVectorStore(BaseVectorStore):
         self, query_vector: list[float], top_k: int = 10, filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
         try:
-            rows = self._conn.execute(
-                "SELECT id, vector, metadata_json FROM vectors"
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id, vector, metadata_json FROM vectors"
+                ).fetchall()
         except sqlite3.Error as exc:
             logger.error("Failed to search vectors: %s", exc)
             return []
@@ -133,15 +134,17 @@ class SQLiteVectorStore(BaseVectorStore):
         import math
 
         qvec = query_vector
+        norm_q = math.sqrt(sum(x * x for x in qvec))
+        if norm_q == 0:
+            return []
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
             vec = self._decode(row["vector"])
             if len(vec) != len(qvec):
                 continue
             dot = sum(x * y for x, y in zip(qvec, vec))
-            norm_q = math.sqrt(sum(x * x for x in qvec))
             norm_v = math.sqrt(sum(x * x for x in vec))
-            if norm_q == 0 or norm_v == 0:
+            if norm_v == 0:
                 continue
             sim = dot / (norm_q * norm_v)
             if sim > 0.01:

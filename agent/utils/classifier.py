@@ -10,10 +10,8 @@ Three-tier adaptive design:
 from __future__ import annotations
 
 import logging
-import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +160,7 @@ _COMPLEX_RULES: list[tuple[str, int]] = [
     ("排查", 2), ("定位", 2),
     ("improve", 2), ("优化", 2), ("refactor", 2),
     ("integrate", 2), ("集成", 2), ("connect", 2), ("对接", 2),
-    ("troubleshoot", 3), ("issue", 2), ("problem", 2),
+    ("issue", 2), ("problem", 2),
     ("recommend", 2), ("suggest", 2), ("建议", 2), ("推荐", 2),
 ]
 
@@ -295,56 +293,73 @@ def _classify_via_keywords(text: str) -> ClassificationResult | None:
     return None
 
 
-def _classify_via_llm(llm: Any, user_input: str) -> ClassificationResult:
-    t0 = time.perf_counter()
-    try:
-        prompt = f"""You are a routing classifier. Decide if this user query is "simple" or "complex".
+def _heuristic_fallback(text: str) -> ClassificationResult:
+    """Smart heuristic when keyword scoring is inconclusive.
 
-Simple = answerable in one step: a single tool call, a direct lookup, or knowledge-based response.
-Complex = needs multiple steps, planning, multiple tool calls, or verification.
+    Checks multiple signals without calling LLM:
+    - Multi-step markers (already detected earlier)
+    - Sentence structure complexity
+    - Action verb density
+    """
+    action_verbs = [
+        "分析", "对比", "研究", "查", "调查", "开发", "创建", "构建",
+        "修复", "调试", "优化", "重构", "集成", "部署", "安装",
+        "monitor", "test", "write", "build", "create", "debug",
+        "fix", "install", "deploy", "integrate", "refactor",
+        "research", "investigate", "analyze", "compare",
+        "write code", "generate", "implement",
+    ]
+    verb_count = sum(1 for v in action_verbs if v in text)
 
-Query: {user_input}
+    connectors = ["然后", "之后", "接着", "再", "并且", "同时", "先", "然后",
+                   " and ", " then ", " after ", "next", "subsequently"]
+    connector_count = sum(1 for c in connectors if c in text)
 
-Reply with exactly one word: simple or complex."""
+    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    total_chars = len(text.replace(" ", ""))
 
-        response = llm.invoke(prompt)
-        answer = response.content.strip().lower()
-        elapsed = time.perf_counter() - t0
-
-        if "simple" in answer:
-            label = "simple"
-        elif "complex" in answer:
-            label = "complex"
-        else:
-            label = "complex"
-
-        logger.info("[Classifier] LLM decision: %s (%.1fs, query=%s)", label, elapsed, user_input[:60])
-        return ClassificationResult(
-            label=label,
-            confidence=0.7,
-            source="llm",
-            detail=f"llm_elapsed={elapsed:.2f}s",
-        )
-    except Exception as exc:
-        logger.warning("[Classifier] LLM failed, defaulting to complex: %s", exc)
+    if connector_count >= 2 or verb_count >= 2:
         return ClassificationResult(
             label="complex",
-            confidence=0.3,
-            source="fallback",
-            detail=f"llm_error={exc}",
+            confidence=0.7,
+            source="heuristic_fallback",
+            detail=f"connectors={connector_count} verbs={verb_count}",
         )
+
+    if total_chars <= 10 and verb_count == 0 and connector_count == 0:
+        return ClassificationResult(
+            label="simple",
+            confidence=0.65,
+            source="heuristic_fallback",
+            detail=f"short_query len={total_chars}",
+        )
+
+    if chinese_chars >= 15 and verb_count >= 1:
+        return ClassificationResult(
+            label="complex",
+            confidence=0.6,
+            source="heuristic_fallback",
+            detail=f"long_query_with_verb chars={chinese_chars} verbs={verb_count}",
+        )
+
+    return ClassificationResult(
+        label="complex",
+        confidence=0.5,
+        source="heuristic_fallback",
+        detail="default_complex_safe",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def classify_query(llm: Any, user_input: str) -> str:
+def classify_query(user_input: str) -> str:
     """Classify query complexity with three-tier adaptive strategy.
 
     Tier 1: Learned corrections (feedback from past runs)
     Tier 2: Keyword + heuristic scoring
-    Tier 3: LLM classification (fallback)
+    Tier 3: Smart heuristic fallback (no LLM call needed)
     """
     key = _cache_key(user_input)
 
@@ -387,9 +402,13 @@ def classify_query(llm: Any, user_input: str) -> str:
         )
         return kw_result.label
 
-    llm_result = _classify_via_llm(llm, user_input)
-    _CACHE.put(key, llm_result)
-    return llm_result.label
+    fallback_result = _heuristic_fallback(text)
+    _CACHE.put(key, fallback_result)
+    logger.info(
+        "[Classifier] heuristic: %s conf=%.2f (%s)",
+        fallback_result.label, fallback_result.confidence, fallback_result.detail,
+    )
+    return fallback_result.label
 
 
 def record_feedback(

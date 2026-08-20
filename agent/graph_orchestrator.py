@@ -39,6 +39,8 @@ from langgraph.graph import END, START, StateGraph
 from agent.config import settings
 from agent.llm.factory import create_llm
 from agent.progress import make_log, make_plan, make_status, make_streaming_token
+from agent.utils.cache import get_cache
+from agent.utils.classifier import classify_query, record_feedback, get_budget
 from agent.utils.retry import CancelledError
 from agent.runner import (
     StreamingCallbackHandler,
@@ -55,7 +57,7 @@ class AgentState(TypedDict, total=False):
     """Shared state across all LangGraph nodes."""
 
     user_input: str
-    short_term_text: str
+    graph_context: str
     chat_history_messages: list
     classification: str
     plan: list[str]
@@ -96,15 +98,22 @@ class GraphOrchestrator:
 
     _tls = threading.local()
 
-    def __init__(self) -> None:
-        self._llm_provider = create_llm()
-        self._llm = self._llm_provider.get_model()
+    def __init__(self, llm_provider: Any = None) -> None:
+        if llm_provider is not None:
+            self._llm_provider = llm_provider
+            self._llm = self._llm_provider.get_model()
+        else:
+            self._llm_provider = create_llm()
+            self._llm = self._llm_provider.get_model()
         self._executor = build_react_executor(
             self._llm,
             max_iterations=settings.MAX_ITERATIONS,
             max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
             verbose=settings.VERBOSE,
         )
+        self._tools_desc = self._build_tools_description()
+        self._tool_router = ToolRouter()
+        self._run_cancel_event: threading.Event | None = None
         try:
             self._graph = self._build_graph()
         except Exception as exc:
@@ -154,6 +163,8 @@ class GraphOrchestrator:
 
     def request_stop(self) -> None:
         """Signal cancellation to the current run (called from any thread)."""
+        if self._run_cancel_event is not None:
+            self._run_cancel_event.set()
         ctx = getattr(self._tls, "ctx", None)
         if ctx:
             ctx.cancel_event.set()
@@ -170,6 +181,7 @@ class GraphOrchestrator:
                 max_execution_time=settings.MAX_EXECUTION_TIME_SEC,
                 verbose=settings.VERBOSE,
                 scene=scene,
+                router=self._tool_router,
             )
         return ctx.scene_executors[scene]
 
@@ -235,7 +247,7 @@ class GraphOrchestrator:
     def run(
         self,
         user_input: str,
-        short_term_text: str,
+        graph_context: str,
         chat_history_messages: list,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_event: threading.Event | None = None,
@@ -249,6 +261,7 @@ class GraphOrchestrator:
             executor=self._executor,
         )
         self._tls.ctx = ctx
+        self._run_cancel_event = ctx.cancel_event
 
         try:
             if self._graph is None:
@@ -258,7 +271,7 @@ class GraphOrchestrator:
 
             initial_state: AgentState = {
                 "user_input": user_input,
-                "short_term_text": short_term_text,
+                "graph_context": graph_context,
                 "chat_history_messages": chat_history_messages,
                 "classification": "",
                 "plan": [],
@@ -293,28 +306,7 @@ class GraphOrchestrator:
 
         finally:
             self._tls.ctx = None
-
-    @staticmethod
-    def _format_chat_history(messages: list) -> str:
-        """Convert LangChain message list to readable transcript."""
-        if not messages:
-            return ""
-        parts: list[str] = []
-        for msg in messages[-10:]:
-            role = getattr(msg, "type", "") or ""
-            content = getattr(msg, "content", "") or ""
-            if isinstance(content, list):
-                content = " ".join(
-                    block.get("text", "") if isinstance(block, dict) else str(block)
-                    for block in content
-                )
-            if role == "human":
-                parts.append(f"用户: {content}")
-            elif role == "ai":
-                parts.append(f"助手: {content}")
-            elif role == "system":
-                parts.append(f"系统: {content[:200]}")
-        return "\n".join(parts)
+            self._run_cancel_event = None
 
     @staticmethod
     def _build_tools_description() -> str:
@@ -339,7 +331,7 @@ class GraphOrchestrator:
         ctx = self._ctx
 
         if not scene and input_text:
-            scene, _ = ToolRouter().smart_route(input_text)
+            scene, _ = self._tool_router.smart_route(input_text)
 
         executor = self._get_or_build_executor(scene)
 
@@ -391,8 +383,6 @@ class GraphOrchestrator:
 
     def _record_complex_downgrade_feedback(self, final_state: AgentState) -> None:
         """After graph completion: learn if complex queries could have been simple."""
-        from agent.utils.classifier import record_feedback
-
         classification = final_state.get("classification", "")
         if classification != "complex":
             return
@@ -415,12 +405,10 @@ class GraphOrchestrator:
 
     def _node_classify(self, state: AgentState) -> dict[str, Any]:
         """Classify query complexity — simple (fast path) or complex (plan+execute)."""
-        from agent.utils.classifier import classify_query
-
         if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
-        classification = classify_query(self._ctx.llm, state["user_input"])
+        classification = classify_query(state["user_input"])
 
         self._emit_log(f"🔍 查询分类: {classification}")
 
@@ -453,8 +441,6 @@ class GraphOrchestrator:
 
     def _node_adaptive_check(self, state: AgentState) -> dict[str, Any]:
         """After fast path: check if budget was exceeded and upgrade to complex if needed."""
-        from agent.utils.classifier import record_feedback, get_budget
-
         if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
@@ -521,13 +507,13 @@ class GraphOrchestrator:
         user_input = state.get("user_input", "")
         previous_plan = state.get("plan", [])
         previous_results = state.get("results", [])
-        chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
-        tools_desc = self._build_tools_description()
+        graph_context = state.get("graph_context", "")
+        tools_desc = self._tools_desc
 
         context_parts = [f"用户目标: {user_input}"]
 
-        if chat_history_text:
-            context_parts.append(f"对话历史:\n{chat_history_text}")
+        if graph_context:
+            context_parts.append(f"上下文:\n{graph_context}")
 
         if previous_plan:
             context_parts.append("之前的计划:")
@@ -598,12 +584,12 @@ class GraphOrchestrator:
         )
 
         user_input = state.get("user_input", "")
-        short_term_text = state.get("short_term_text", "")
+        graph_context = state.get("graph_context", "")
         chat_history = state.get("chat_history_messages", [])
 
         context_sections = []
-        if short_term_text:
-            context_sections.append(f"之前的上下文:\n{short_term_text[:800]}")
+        if graph_context:
+            context_sections.append(f"之前的上下文:\n{graph_context[:1200]}")
 
         step_prompt = f"""执行此步骤以实现用户目标。
 
@@ -653,7 +639,7 @@ class GraphOrchestrator:
         results = state.get("results", [])
         plan = state.get("plan", [])
         plan_rounds = state.get("plan_rounds", 0)
-        chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
+        graph_context = state.get("graph_context", "")
 
         if self._is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -677,8 +663,8 @@ class GraphOrchestrator:
         full_summary = "\n".join(summary_parts)
 
         context_block = ""
-        if chat_history_text:
-            context_block = f"\n\n对话上下文:\n{chat_history_text[:600]}"
+        if graph_context:
+            context_block = f"\n\n上下文:\n{graph_context[:800]}"
 
         prompt = f"""{full_summary}{context_block}
 
@@ -747,10 +733,12 @@ class GraphOrchestrator:
         results = state.get("results", [])
         plan = state.get("plan", [])
         verification_feedback = state.get("result", "")
-        chat_history_text = self._format_chat_history(state.get("chat_history_messages", []))
+        graph_context = state.get("graph_context", "")
 
         plan_lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan))
         result_lines = "\n".join(f"步骤 {i + 1}: {r[:200]}" for i, r in enumerate(results))
+
+        context_block = f"\n对话上下文:\n{graph_context[:500]}" if graph_context else ""
 
         prompt = f"""原始目标: {user_input}
 
@@ -761,8 +749,7 @@ class GraphOrchestrator:
 {result_lines}
 
 验证反馈: {verification_feedback[:500]}
-{chr(10).join('对话上下文:' if chat_history_text else '')}
-{chat_history_text[:400] if chat_history_text else ''}
+{context_block}
 
 请创建一个新的执行计划来完成剩余工作。
 只列出仍需完成的步骤。
@@ -797,13 +784,25 @@ class GraphOrchestrator:
     # LLM helpers
     # ------------------------------------------------------------------
 
-    def _stream_llm_response(self, prompt: str, emit_tokens: bool = False) -> str:
+    def _stream_llm_response(self, prompt: str) -> str:
         """Stream LLM response with cancellation support.
 
         Timeout is handled by the LLM provider's HTTP client (timeout config).
         Cancellation is checked between every token for responsive stopping.
+        Token usage is always tracked via the run context's token_tracker.
+        Results are cached in the global LLMCache for identical prompts.
         """
         ctx = self._ctx
+        cache = get_cache()
+        cache_key = cache.make_key(self._llm_provider.model_name, prompt)
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            logger.debug("[GraphOrch] LLM cache hit for prompt hash")
+            if ctx.token_tracker:
+                ctx.token_tracker(ctx.last_token_count or 50)
+            return cached
+
         collected: list[str] = []
         token_count = 0
         try:
@@ -815,15 +814,17 @@ class GraphOrchestrator:
                 if token:
                     collected.append(token)
                     token_count += 1
-                    if emit_tokens and ctx.progress_cb:
-                        ctx.progress_cb(make_streaming_token(token))
         except Exception as exc:
             logger.warning("[GraphOrch] Stream error: %s", exc)
             self._emit_log(f"⚠️ 流式输出中断: {exc}")
         ctx.last_token_count = token_count
         if ctx.token_tracker and token_count > 0:
             ctx.token_tracker(token_count)
-        return "".join(collected)
+
+        result = "".join(collected)
+        if result and token_count > 0:
+            cache.set(cache_key, result)
+        return result
 
     def _truncate_output(self, text: str) -> str:
         """Truncate long tool outputs to avoid context bloat."""

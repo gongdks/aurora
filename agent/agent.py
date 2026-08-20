@@ -56,7 +56,7 @@ class AgentSession:
 
         self._llm_provider = create_llm()
         self.memory = MemoryManager()
-        self._graph_orchestrator = GraphOrchestrator()
+        self._graph_orchestrator = GraphOrchestrator(self._llm_provider)
         logger.info("AgentSession created | mode=graph | LLM: %s", self._llm_provider.model_name)
 
     @property
@@ -98,12 +98,12 @@ class AgentSession:
         short_term_text = self.memory.format_short_term(chat_history)
         messages_list = self.memory.format_short_term_messages(chat_history)
 
-        context = short_term_text
+        graph_context = short_term_text
         if extra_context:
-            context = f"{short_term_text}\n\n{extra_context}"
+            graph_context = f"{short_term_text}\n\n{extra_context}"
 
         try:
-            answer = worker(context, messages_list)
+            answer = worker(graph_context, messages_list)
         except Exception as exc:
             logger.error("Worker error: %s", exc, exc_info=True)
             answer = f"错误: {exc}"
@@ -117,13 +117,13 @@ class AgentSession:
         safe_done(progress_callback, answer)
         return answer
 
-    def _graph_worker(self, context: str, messages: list) -> str:
+    def _graph_worker(self, graph_context: str, messages: list) -> str:
         def _track_tokens(count: int) -> None:
             self._track_usage(total_tokens=count)
 
         return self._graph_orchestrator.run(
             self._current_user_input,
-            context,
+            graph_context,
             messages,
             progress_callback=self._current_progress_cb,
             cancel_event=self._cancel_flag,

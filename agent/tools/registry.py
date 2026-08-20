@@ -139,7 +139,6 @@ def list_scene_tools(scene: str) -> list:
         - analysis: Data analysis + core
         - research: Research tools (web, summarize, translate) + core
     """
-    ensure_builtin_tools()
     tag_set = SCENE_TAGS.get(scene, CORE_TAGS)
     return list_tools(tags=tag_set)
 
@@ -225,9 +224,6 @@ class ToolRouter:
         router = ToolRouter()
         tools = router.route("research")  # returns web + summarize tools
     """
-
-    def __init__(self) -> None:
-        ensure_builtin_tools()
 
     def route(
         self,

@@ -158,6 +158,7 @@ def build_react_executor(
     verbose: bool = False,
     scene: str | None = None,
     user_input: str | None = None,
+    router: ToolRouter | None = None,
 ) -> AgentExecutor:
     """构建一个 tool-calling AgentExecutor 实例（原生函数调用）。
 
@@ -169,12 +170,14 @@ def build_react_executor(
         verbose: 是否启用详细日志
         scene: 工具场景过滤（general/file/web/code/dev/analysis/research），None=全部加载
         user_input: 用户输入（用于智能场景检测，自动选择工具）
+        router: 共享的 ToolRouter 实例，避免重复创建
 
     Returns:
         配置好的 AgentExecutor
     """
     if scene or user_input:
-        router = ToolRouter()
+        if router is None:
+            router = ToolRouter()
         if user_input and not scene:
             scene, tools = router.smart_route(user_input)
             logger.info("[Router] Auto-detected scene: %s (%d tools)", scene, len(tools))

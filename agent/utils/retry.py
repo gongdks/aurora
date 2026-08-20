@@ -171,8 +171,7 @@ def llm_invoke_with_guard(
         try:
             return llm.invoke(messages, timeout=_timeout)
         except TypeError:
-            future = _shared_executor.submit(llm.invoke, messages)
-            return future.result(timeout=_timeout)
+            return llm.invoke(messages)
 
     return _retry_call(
         _invoke, llm, messages,

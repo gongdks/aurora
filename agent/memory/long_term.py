@@ -15,6 +15,7 @@ Thread-safe: uses a single write lock with a shared SQLite connection.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -22,6 +23,7 @@ import sqlite3
 import struct
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any
 
@@ -82,6 +84,9 @@ class LongTermMemory:
         self._conn.row_factory = sqlite3.Row
         self._init_db()
         self._vector_store: BaseVectorStore | None = None
+        self._search_cache: OrderedDict[str, tuple[list[dict[str, Any]], float]] = OrderedDict()
+        self._search_cache_max: int = 128
+        self._search_cache_ttl: float = 30.0
 
     @property
     def vs(self) -> BaseVectorStore | None:
@@ -188,6 +193,7 @@ class LongTermMemory:
                            updated_at=excluded.updated_at""",
                         (key, content, category, embedding_blob, now, now),
                     )
+                self._invalidate_search_cache()
             except sqlite3.Error as exc:
                 logger.error("Failed to store memory '%s': %s", key, exc)
 
@@ -213,11 +219,27 @@ class LongTermMemory:
             return semantic_results
         return self._keyword_search(query, category=category, limit=limit)
 
+    def keyword_search(self, query: str, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        """Search memories by keyword only (no embedding)."""
+        return self._keyword_search(query, category=category, limit=limit)
+
     def semantic_search(self, query: str, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
         """Search memories by semantic similarity (cosine distance).
 
         Uses vector store (Chroma) if available, falls back to SQLite BLOB scan.
+        Results are cached with short TTL for repeated queries.
         """
+        cache_key = hashlib.md5(f"{query}:{category or ''}:{limit}".encode()).hexdigest()
+        now = time.time()
+
+        cached = self._search_cache.get(cache_key)
+        if cached is not None:
+            results, expire_at = cached
+            if now < expire_at:
+                self._search_cache.move_to_end(cache_key)
+                return results
+            del self._search_cache[cache_key]
+
         try:
             ep = get_embedding_provider()
             query_vec = ep.embed(query)
@@ -244,11 +266,32 @@ class LongTermMemory:
                         "score": r["score"],
                     })
                 items.sort(key=lambda x: x.get("score", 0), reverse=True)
-                return items[:limit]
+                items = items[:limit]
+                self._search_cache[cache_key] = (items, now + self._search_cache_ttl)
+                self._search_cache.move_to_end(cache_key)
+                self._evict_search_cache()
+                return items
             except Exception as exc:
                 logger.warning("Vector store search failed, falling back: %s", exc)
 
-        return self._semantic_search_sqlite(query_vec, category, limit)
+        items = self._semantic_search_sqlite(query_vec, category, limit)
+        self._search_cache[cache_key] = (items, now + self._search_cache_ttl)
+        self._search_cache.move_to_end(cache_key)
+        self._evict_search_cache()
+        return items
+
+    def _evict_search_cache(self) -> None:
+        """Evict expired and overflow entries from search cache."""
+        now = time.time()
+        expired = [k for k, (_, exp) in self._search_cache.items() if exp <= now]
+        for k in expired:
+            del self._search_cache[k]
+        while len(self._search_cache) > self._search_cache_max:
+            self._search_cache.popitem(last=False)
+
+    def _invalidate_search_cache(self) -> None:
+        """Clear all cached search results (called after writes)."""
+        self._search_cache.clear()
 
     def _semantic_search_sqlite(self, query_vec: list[float], category: str | None, limit: int) -> list[dict[str, Any]]:
         """Fallback: scan all embeddings from SQLite BLOB and compute cosine similarity."""
@@ -387,6 +430,7 @@ class LongTermMemory:
                            VALUES (?, ?, ?, ?, ?)""",
                         (user_input, agent_response, summary, embedding_blob, now),
                     )
+                self._invalidate_search_cache()
             except sqlite3.Error as exc:
                 logger.error("Failed to store conversation summary: %s", exc)
 

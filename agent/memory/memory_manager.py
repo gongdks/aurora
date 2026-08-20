@@ -76,7 +76,7 @@ class MemoryManager:
         """
         memories = self.long_term.semantic_search(user_input, limit=limit)
         if not memories:
-            memories = self.long_term.search(user_input, limit=limit)
+            memories = self.long_term.keyword_search(user_input, limit=limit)
         summaries = self.long_term.recent_summaries(limit=3)
         if not memories and not summaries:
             return ""
