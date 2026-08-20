@@ -8,7 +8,7 @@ Stores:
 
 Vector store backends:
   - sqlite (default): SQLite BLOB storage, zero dependency
-  - chroma: professional vector search with HNSW indexing
+  - memory: fast in-memory storage (volatile)
 
 Thread-safe: uses a single write lock with a shared SQLite connection.
 """
@@ -226,7 +226,7 @@ class LongTermMemory:
     def semantic_search(self, query: str, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
         """Search memories by semantic similarity (cosine distance).
 
-        Uses vector store (Chroma) if available, falls back to SQLite BLOB scan.
+        Uses vector store (SQLite BLOB or InMemory) for semantic search.
         Results are cached with short TTL for repeated queries.
         """
         cache_key = hashlib.md5(f"{query}:{category or ''}:{limit}".encode()).hexdigest()

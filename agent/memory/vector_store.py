@@ -1,13 +1,15 @@
-"""Vector store abstraction — SQLite BLOB or ChromaDB.
+"""Vector store abstraction — SQLite BLOB + InMemory.
 
 Provides a unified interface for vector operations (upsert, semantic search,
-delete, clear). Default backend is SQLite BLOB (zero-dependency), with Chroma
-as a drop-in upgrade for larger-scale semantic search.
+delete, clear) with two backends:
+
+  - SQLiteVectorStore: persistent SQLite BLOB storage, zero-dependency
+  - InMemoryVectorStore: fast in-memory storage (lost on restart)
 
 Usage:
     from agent.memory.vector_store import get_vector_store
 
-    vs = get_vector_store()  # auto-selects backend based on config
+    vs = get_vector_store()
     vs.upsert("mem_1", vec, metadata={"key": "user_name", "category": "profile"})
     results = vs.search(query_vec, top_k=5)
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import struct
 import sqlite3
@@ -70,11 +73,79 @@ class BaseVectorStore:
         pass
 
 
-class SQLiteVectorStore(BaseVectorStore):
-    """SQLite + BLOB vector store — zero-dependency fallback.
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(x * x for x in vec_a))
+    norm_b = math.sqrt(sum(x * x for x in vec_b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
-    Suitable for small-to-medium datasets (up to ~10k vectors).
-    Semantic search scans all vectors and computes cosine similarity in Python.
+
+class InMemoryVectorStore(BaseVectorStore):
+    """Fast in-memory vector store — lost on restart, but ultra-fast.
+
+    Suitable for hot-path lookups and temporary caches.
+    Thread-safe via a read-write lock pattern.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, dict[str, Any]] = {}
+        self._vectors: dict[str, list[float]] = {}
+        self._lock = threading.RLock()
+
+    def upsert(
+        self, id: str, vector: list[float], metadata: dict[str, Any] | None = None
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            self._vectors[id] = list(vector)
+            self._store[id] = {
+                "metadata": metadata or {},
+                "created_at": self._store.get(id, {}).get("created_at", now),
+                "updated_at": now,
+            }
+
+    def search(
+        self, query_vector: list[float], top_k: int = 10, filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            items: list[tuple[float, dict[str, Any]]] = []
+            for vid, vec in self._vectors.items():
+                if len(vec) != len(query_vector):
+                    continue
+                meta = self._store[vid]["metadata"]
+                if filters and not all(meta.get(k) == v for k, v in filters.items()):
+                    continue
+                sim = _cosine_similarity(query_vector, vec)
+                if sim > 0.01:
+                    items.append((sim, {"id": vid, "score": sim, "metadata": meta}))
+
+        items.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in items[:top_k]]
+
+    def delete(self, id: str) -> None:
+        with self._lock:
+            self._vectors.pop(id, None)
+            self._store.pop(id, None)
+
+    def clear(self) -> int:
+        with self._lock:
+            n = len(self._vectors)
+            self._vectors.clear()
+            self._store.clear()
+            return n
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._vectors)
+
+
+class SQLiteVectorStore(BaseVectorStore):
+    """SQLite + BLOB vector store — persistent, zero-dependency.
+
+    Suitable for datasets up to ~10k vectors. Cosine similarity computed
+    in Python. Thread-safe with a single write lock.
     """
 
     def __init__(self, db_path: str | None = None) -> None:
@@ -131,22 +202,17 @@ class SQLiteVectorStore(BaseVectorStore):
             logger.error("Failed to search vectors: %s", exc)
             return []
 
-        import math
-
         qvec = query_vector
         norm_q = math.sqrt(sum(x * x for x in qvec))
         if norm_q == 0:
             return []
+
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
             vec = self._decode(row["vector"])
             if len(vec) != len(qvec):
                 continue
-            dot = sum(x * y for x, y in zip(qvec, vec))
-            norm_v = math.sqrt(sum(x * x for x in vec))
-            if norm_v == 0:
-                continue
-            sim = dot / (norm_q * norm_v)
+            sim = _cosine_similarity(qvec, vec)
             if sim > 0.01:
                 meta = json.loads(row["metadata_json"] or "{}")
                 if filters:
@@ -190,129 +256,28 @@ class SQLiteVectorStore(BaseVectorStore):
                 pass
 
 
-class ChromaVectorStore(BaseVectorStore):
-    """ChromaDB vector store — professional-grade vector search.
-
-    Requires `chromadb` package: pip install chromadb
-    Supports metadata filtering, HNSW indexing, and persistent storage.
-    """
-
-    def __init__(self, persist_dir: str | None = None) -> None:
-        self._persist_dir = persist_dir or settings.CHROMA_PERSIST_DIR
-        self._client = None
-        self._collection = None
-        self._init_client()
-
-    def _init_client(self) -> None:
-        try:
-            import chromadb
-            from chromadb.config import Settings
-
-            self._client = chromadb.PersistentClient(
-                path=self._persist_dir,
-                settings=Settings(anonymized_telemetry=False),
-            )
-            self._collection = self._client.get_or_create_collection(
-                name="agent_memories",
-                metadata={"hnsw:space": "cosine"},
-            )
-            count = self._collection.count()
-            logger.info("[Chroma] Connected | collection=agent_memories | count=%d", count)
-        except ImportError:
-            logger.warning("chromadb not installed. Run: pip install chromadb")
-            raise
-        except Exception as exc:
-            logger.error("Failed to initialize ChromaDB: %s", exc)
-            raise
-
-    def upsert(
-        self, id: str, vector: list[float], metadata: dict[str, Any] | None = None
-    ) -> None:
-        try:
-            self._collection.upsert(
-                ids=[id],
-                embeddings=[vector],
-                metadatas=[metadata or {}],
-            )
-        except Exception as exc:
-            logger.error("Chroma upsert failed for '%s': %s", id, exc)
-
-    def search(
-        self, query_vector: list[float], top_k: int = 10, filters: dict[str, Any] | None = None
-    ) -> list[dict[str, Any]]:
-        try:
-            kwargs: dict[str, Any] = {
-                "query_embeddings": [query_vector],
-                "n_results": min(top_k, self._collection.count() or 1),
-                "include": ["metadatas", "distances"],
-            }
-            if filters:
-                kwargs["where"] = filters
-            results = self._collection.query(**kwargs)
-
-            items: list[dict[str, Any]] = []
-            if results and results["ids"]:
-                for i, rid in enumerate(results["ids"][0]):
-                    distance = results["distances"][0][i] if results["distances"] else 0.0
-                    score = 1.0 - distance if distance else 0.0
-                    items.append({
-                        "id": rid,
-                        "score": score,
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                    })
-            return items
-        except Exception as exc:
-            logger.error("Chroma search failed: %s", exc)
-            return []
-
-    def delete(self, id: str) -> None:
-        try:
-            self._collection.delete(ids=[id])
-        except Exception as exc:
-            logger.error("Chroma delete failed for '%s': %s", id, exc)
-
-    def clear(self) -> int:
-        try:
-            count = self._collection.count()
-            self._client.delete_collection("agent_memories")
-            self._collection = self._client.get_or_create_collection(
-                name="agent_memories",
-                metadata={"hnsw:space": "cosine"},
-            )
-            return count
-        except Exception:
-            return 0
-
-    def count(self) -> int:
-        try:
-            return self._collection.count()
-        except Exception:
-            return 0
-
-    def close(self) -> None:
-        pass
-
-
 _vector_store: BaseVectorStore | None = None
 
 
 def get_vector_store() -> BaseVectorStore:
-    """Get or create the singleton vector store based on config."""
+    """Get or create the singleton vector store.
+
+    Uses SQLite BLOB for persistent storage (default) or InMemory for
+    fast-but-volatile storage, controlled by config.VECTOR_STORE.
+    """
     global _vector_store
     if _vector_store is not None:
         return _vector_store
 
     backend = settings.VECTOR_STORE.strip().lower()
-    if backend == "chroma":
-        try:
-            _vector_store = ChromaVectorStore()
-            logger.info("Vector store backend: ChromaDB")
-            return _vector_store
-        except Exception as exc:
-            logger.warning("ChromaDB init failed (%s), falling back to SQLite", exc)
 
-    _vector_store = SQLiteVectorStore()
-    logger.info("Vector store backend: SQLite BLOB")
+    if backend == "memory":
+        _vector_store = InMemoryVectorStore()
+        logger.info("Vector store: InMemory (fast, volatile)")
+    else:
+        _vector_store = SQLiteVectorStore()
+        logger.info("Vector store: SQLite BLOB (persistent, zero-dependency)")
+
     return _vector_store
 
 
@@ -322,3 +287,50 @@ def reset_vector_store() -> None:
     if _vector_store is not None:
         _vector_store.close()
     _vector_store = None
+
+
+def get_storage_info() -> dict[str, Any]:
+    """Get current storage architecture information.
+
+    Shows the layered storage model:
+      - SQLite: always-on structured data (facts, skills, configs)
+      - Vector: selected vector search backend (SQLite BLOB or InMemory)
+      - Cache: in-memory LRU caches
+    """
+    vs = _vector_store
+    backend_type = "none"
+    backend_detail = ""
+    if vs is not None:
+        backend_type = "in_memory" if isinstance(vs, InMemoryVectorStore) else "sqlite_blob"
+        backend_detail = f" (count={vs.count()})"
+
+    long_term_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "agent_long_term.db",
+    )
+    skill_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "agent_skills", "skills.db",
+    )
+
+    return {
+        "structured_storage": {
+            "type": "SQLite",
+            "databases": [
+                {"path": long_term_path, "purpose": "facts, preferences, conversation summaries"},
+                {"path": skill_path, "purpose": "learned skills, tool sequences"},
+            ],
+        },
+        "vector_storage": {
+            "type": backend_type,
+            "detail": backend_detail.strip(),
+            "config": settings.VECTOR_STORE,
+        },
+        "cache_layers": {
+            "llm_response": "LRU+TTL (global LLMCache)",
+            "embedding": "LRU+TTL (per-provider cache)",
+            "search_results": "LRU+TTL (LongTermMemory._search_cache)",
+            "tool_descriptions": "GraphOrchestrator._tools_desc",
+        },
+        "architecture": "layered",
+    }

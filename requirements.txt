@@ -34,6 +34,4 @@ pypdf>=4.0.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
 
-# Vector store (optional, for large-scale semantic search)
-# Install if VECTOR_STORE=chroma in .env
-chromadb>=0.5.0
+# Vector store — SQLite BLOB is built-in (no extra dependency needed)

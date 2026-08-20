@@ -41,6 +41,16 @@ from agent.llm.factory import create_llm
 from agent.progress import make_log, make_plan, make_status, make_streaming_token
 from agent.utils.cache import get_cache
 from agent.utils.classifier import classify_query, record_feedback, get_budget
+from agent.utils.reflection import ReflectionEngine, ReflectionResult, ReflectionScore
+from agent.utils.skill_learner import SkillLearner
+from agent.utils.skill_store import SkillStore
+from agent.utils.autonomous_loop import AutonomousLoop, Goal
+from agent.utils.multi_agent import (
+    BaseAgentRole,
+    CoordinatorRole,
+    MessageBus,
+    create_default_team,
+)
 from agent.utils.retry import CancelledError
 from agent.runner import (
     StreamingCallbackHandler,
@@ -73,6 +83,10 @@ class AgentState(TypedDict, total=False):
     fast_hit_limit: bool
     complex_steps_executed: int
     complex_elapsed: float
+    reflection_scores: dict[str, float]
+    reflection_summary: str
+    reflection_adjustments: list[str]
+    reflection_rounds: int
 
 
 @dataclass
@@ -113,6 +127,17 @@ class GraphOrchestrator:
         )
         self._tools_desc = self._build_tools_description()
         self._tool_router = ToolRouter()
+        self._reflection_engine = ReflectionEngine(llm=self._llm)
+        self._skill_store = SkillStore()
+        self._skill_learner = SkillLearner(self._skill_store)
+        self._autonomous_loop = AutonomousLoop(
+            llm=self._llm,
+            action_callback=self._autonomous_action,
+            reflection_engine=self._reflection_engine,
+        )
+        self._message_bus = MessageBus()
+        self._coordinator = create_default_team(llm=self._llm, message_bus=self._message_bus)
+        self._use_multi_agent = False
         self._run_cancel_event: threading.Event | None = None
         try:
             self._graph = self._build_graph()
@@ -195,6 +220,7 @@ class GraphOrchestrator:
         graph.add_node("execute_step", self._node_execute_step)
         graph.add_node("check_steps", self._node_check_steps)
         graph.add_node("verify", self._node_verify)
+        graph.add_node("reflect", self._node_reflect)
         graph.add_node("re_plan", self._node_re_plan)
 
         graph.add_edge(START, "classify")
@@ -231,12 +257,15 @@ class GraphOrchestrator:
             },
         )
 
+        graph.add_edge("verify", "reflect")
+
         graph.add_conditional_edges(
-            "verify",
-            self._route_after_verify,
+            "reflect",
+            self._route_after_reflect,
             {
                 "complete": END,
-                "incomplete": "re_plan",
+                "replan": "re_plan",
+                "continue": "execute_step",
             },
         )
 
@@ -734,11 +763,21 @@ class GraphOrchestrator:
         plan = state.get("plan", [])
         verification_feedback = state.get("result", "")
         graph_context = state.get("graph_context", "")
+        reflection_adjustments = state.get("reflection_adjustments", [])
+        reflection_summary = state.get("reflection_summary", "")
 
         plan_lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan))
         result_lines = "\n".join(f"步骤 {i + 1}: {r[:200]}" for i, r in enumerate(results))
 
         context_block = f"\n对话上下文:\n{graph_context[:500]}" if graph_context else ""
+
+        reflection_block = ""
+        if reflection_summary:
+            reflection_block = f"\n\n## 深度反思结果\n{reflection_summary[:500]}"
+        if reflection_adjustments:
+            reflection_block += "\n\n## 策略调整建议:\n" + "\n".join(
+                f"- {a}" for a in reflection_adjustments[:5]
+            )
 
         prompt = f"""原始目标: {user_input}
 
@@ -749,10 +788,11 @@ class GraphOrchestrator:
 {result_lines}
 
 验证反馈: {verification_feedback[:500]}
+{reflection_block}
 {context_block}
 
-请创建一个新的执行计划来完成剩余工作。
-只列出仍需完成的步骤。
+请根据反思结果和策略调整建议，创建一个改进后的执行计划。
+只列出仍需完成的步骤，优先解决反思中发现的问题。
 
 重要：您必须使用中文回复。所有步骤描述必须使用中文。
 
@@ -912,3 +952,210 @@ class GraphOrchestrator:
     @staticmethod
     def _route_after_verify(state: AgentState) -> str:
         return "complete" if state.get("is_done") else "incomplete"
+
+    def _node_reflect(self, state: AgentState) -> dict[str, Any]:
+        """Deep reflection — self-evaluation after verification.
+
+        Analyzes execution quality across multiple dimensions,
+        extracts lessons learned, and decides whether to replan.
+        """
+        if self._is_cancelled():
+            return {"result": "⏹ 已停止", "is_done": True}
+
+        if state.get("is_done"):
+            return {}
+
+        user_input = state.get("user_input", "")
+        plan = state.get("plan", [])
+        results = state.get("results", [])
+        graph_context = state.get("graph_context", "")
+        verification_feedback = state.get("result", "")
+        reflection_rounds = state.get("reflection_rounds", 0)
+
+        self._emit_log("🤔 正在进行深度反思...")
+
+        self._emit_log(
+            f"📊 执行统计: {len(results)} 步骤, "
+            f"用时 {state.get('complex_elapsed', 0):.1f}s"
+        )
+
+        relevant_strategy = self._reflection_engine.get_relevant_strategy(user_input)
+        if relevant_strategy:
+            self._emit_log("💡 发现相关历史策略，参考之前的成功经验")
+
+        execution_metrics = {
+            "steps": state.get("complex_steps_executed", len(plan)),
+            "tool_calls": state.get("fast_tool_calls", 0),
+            "time": state.get("complex_elapsed", 0),
+        }
+
+        try:
+            reflection_result = self._reflection_engine.reflect(
+                user_input=user_input,
+                plan=plan,
+                results=results,
+                execution_metrics=execution_metrics,
+                previous_feedback=verification_feedback,
+            )
+        except Exception as exc:
+            logger.warning("[GraphOrch] Reflection failed: %s", exc)
+            reflection_result = ReflectionResult(
+                scores=ReflectionScore(overall=0.5),
+                should_replan=True,
+                summary=f"反思失败: {exc}",
+            )
+
+        scores_dict = {
+            "goal_completeness": reflection_result.scores.goal_completeness,
+            "output_quality": reflection_result.scores.output_quality,
+            "process_efficiency": reflection_result.scores.process_efficiency,
+            "tool_selection": reflection_result.scores.tool_selection,
+            "overall": reflection_result.scores.overall,
+        }
+
+        self._emit_log(
+            f"📈 反思评分: 综合={reflection_result.scores.overall:.2f} | "
+            f"完整性={reflection_result.scores.goal_completeness:.2f} | "
+            f"质量={reflection_result.scores.output_quality:.2f}"
+        )
+
+        if reflection_result.went_well:
+            for item in reflection_result.went_well[:3]:
+                self._emit_log(f"  ✅ {item}")
+
+        if reflection_result.went_wrong:
+            for item in reflection_result.went_wrong[:3]:
+                self._emit_log(f"  ❌ {item}")
+
+        if reflection_result.strategy_adjustments:
+            for item in reflection_result.strategy_adjustments[:3]:
+                self._emit_log(f"  🔧 {item}")
+
+        self._emit_log(
+            f"{'🎯 目标达成，结束执行' if not reflection_result.should_replan else '🔄 需要调整策略，重新规划'}"
+        )
+
+        if not reflection_result.should_replan and reflection_result.scores.overall >= 0.5:
+            try:
+                learned = self._skill_learner.learn_from_execution(
+                    user_input=user_input,
+                    plan=plan,
+                    results=results,
+                    success=True,
+                    reflection_score=reflection_result.scores.overall,
+                )
+                if learned:
+                    self._emit_log(f"📚 新技能已学习: {learned.name}")
+            except Exception as exc:
+                logger.debug("[GraphOrch] Skill learning failed: %s", exc)
+
+        new_reflection_rounds = reflection_rounds + 1
+
+        return {
+            "reflection_scores": scores_dict,
+            "reflection_summary": reflection_result.summary,
+            "reflection_adjustments": reflection_result.strategy_adjustments,
+            "reflection_rounds": new_reflection_rounds,
+            "reflection_should_replan": reflection_result.should_replan,
+            "reflection_confidence": reflection_result.confidence,
+        }
+
+    @staticmethod
+    def _route_after_reflect(state: AgentState) -> str:
+        """Route after reflection: complete, replan, or continue."""
+        if state.get("is_done"):
+            return "complete"
+
+        should_replan = state.get("reflection_should_replan", False)
+        reflection_rounds = state.get("reflection_rounds", 0)
+        plan_rounds = state.get("plan_rounds", 0)
+
+        if not should_replan:
+            return "complete"
+
+        if reflection_rounds >= 2 or plan_rounds >= settings.MAX_PLAN_ROUNDS:
+            return "complete"
+
+        return "replan"
+
+    def _autonomous_action(self, goal: Goal) -> str:
+        """Action callback for autonomous loop — execute one step."""
+        try:
+            result = self.run(
+                user_input=goal.description,
+                graph_context=str(goal.context),
+                chat_history_messages=[],
+            )
+            if result and "错误" not in result:
+                return result
+        except Exception as exc:
+            logger.warning("[GraphOrch] Autonomous action failed: %s", exc)
+        return ""
+
+    def start_autonomous_mode(self) -> None:
+        """Start the background autonomous execution loop."""
+        self._autonomous_loop.start()
+        self._emit_status("🌀 自主运行模式已启动")
+
+    def stop_autonomous_mode(self) -> None:
+        """Stop the background autonomous execution loop."""
+        self._autonomous_loop.stop()
+        self._emit_status("⏹ 自主运行模式已停止")
+
+    def add_autonomous_goal(
+        self,
+        description: str,
+        priority: int = 0,
+        deadline: float | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Goal:
+        """Add a goal for autonomous pursuit."""
+        goal = Goal(
+            description=description,
+            priority=priority,
+            deadline=deadline,
+            context=context or {},
+        )
+        self._autonomous_loop.add_goal(goal)
+        self._emit_log(f"🎯 目标已添加: {description}")
+        return goal
+
+    @property
+    def autonomous_stats(self) -> dict[str, Any]:
+        return self._autonomous_loop.stats
+
+    def enable_multi_agent_mode(self, enabled: bool = True) -> None:
+        """Enable/disable multi-agent role collaboration mode."""
+        self._use_multi_agent = enabled
+        self._emit_log(
+            f"{'👥 多 Agent 协作模式已启用' if enabled else '👤 单 Agent 模式'}"
+        )
+
+    def run_multi_agent(
+        self,
+        user_input: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a task using multi-agent role collaboration."""
+        self._emit_log("👥 启动多 Agent 协作...")
+        self._emit_log(f"📋 分解任务: {user_input[:80]}")
+
+        sub_tasks = self._coordinator.decompose_task(user_input)
+        for st in sub_tasks:
+            self._emit_log(f"  → 分配给 {st['role']}: {st['task'][:60]}")
+
+        result = self._coordinator.execute(user_input, context=context)
+
+        self._emit_log(
+            f"✅ 协作完成: {result.get('success_count', 0)}/{result.get('total_count', 0)} 角色成功"
+        )
+
+        return result
+
+    @property
+    def team_stats(self) -> dict[str, Any]:
+        return {
+            "roles": list(self._coordinator._roles.keys()),
+            "message_bus": self._message_bus.stats,
+            "collaboration_history": len(self._coordinator.get_collaboration_history()),
+        }

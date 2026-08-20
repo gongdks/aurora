@@ -75,9 +75,13 @@ class Settings(BaseSettings):
     REMOTE_EMBEDDING_DIMENSION: int = 1536
 
     # ---- Vector Store ----
-    # Options: chroma | sqlite
-    VECTOR_STORE: str = "chroma"
-    CHROMA_PERSIST_DIR: str = "./chroma_db"
+    # Options: sqlite | memory
+    #   sqlite:  Persistent SQLite BLOB storage (default, zero-dependency)
+    #   memory:  Fast in-memory storage (lost on restart)
+    #
+    # NOTE: SQLite is ALWAYS used for structured data (facts, skills, configs).
+    #       This setting controls ONLY the vector search backend.
+    VECTOR_STORE: str = "sqlite"
 
     # ---- Verbosity ----
     VERBOSE: bool = False
