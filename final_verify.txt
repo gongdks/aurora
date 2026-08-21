@@ -1,0 +1,10 @@
+FAIL GraphOrchestrator: unmatched '}' (reflection.py, line 454)
+Traceback (most recent call last):
+  File "d:\AIWORK\PythonProject\final_verify.py", line 3, in <module>
+    from agent.graph_orchestrator import GraphOrchestrator
+  File "d:\AIWORK\PythonProject\agent\graph_orchestrator.py", line 56, in <module>
+    from agent.utils.reflection import ReflectionEngine, ReflectionResult, ReflectionScore
+  File "d:\AIWORK\PythonProject\agent\utils\reflection.py", line 454
+    }
+    ^
+SyntaxError: unmatched '}'

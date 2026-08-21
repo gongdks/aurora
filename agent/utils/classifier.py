@@ -1,10 +1,22 @@
-"""Query classifier — hybrid keyword + LLM + adaptive feedback with confidence scoring and cache.
+"""Query classifier — LangGraph-native hybrid keyword + heuristic + adaptive feedback.
 
-Three-tier adaptive design:
-  Tier 1: Learned corrections (feedback from past runs)
-  Tier 2: Keyword weight scoring with conflict resolution
-  Tier 3: LLM-based classification (fallback)
-  Runtime: Budget monitoring auto-upgrades/downgrades paths.
+Three-tier adaptive design as a LangGraph StateGraph:
+
+  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+  │ check_learned│───→│  check_cache │───→│  apply_heur  │───→│   END    │
+  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘    └──────────┘
+         │ miss               │ miss               │ low conf
+         ▼                    ▼                    ▼
+  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+  │ keyword_score│───→│  heuristic   │───→│  feedback    │───→│   END    │
+  └──────────────┘    │  _fallback   │    │    _route    │    └──────────┘
+                      └──────────────┘    └──────────────┘
+
+Key LangGraph features leveraged:
+  - StateGraph with typed state for clean data flow
+  - Conditional edges for tier-based routing (learned → cache → heuristic → keyword → fallback)
+  - Checkpointer for classification state persistence
+  - Separation of each classification tier into independent nodes
 """
 
 from __future__ import annotations
@@ -12,6 +24,10 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.memory import MemorySaver
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +40,25 @@ class ClassificationResult:
     detail: str = ""
 
 
+class ClassifierState(TypedDict, total=False):
+    user_input: str
+    normalized_text: str
+    cache_key: str
+    label: str
+    confidence: float
+    source: str
+    detail: str
+    iterations: int
+    tool_calls: int
+    elapsed: float
+    steps_executed: int
+
+
 # ---------------------------------------------------------------------------
-# Learned classifications — feedback from runtime execution
+# Learned classifications
 # ---------------------------------------------------------------------------
 
 class _LearnedClassifications:
-    """Stores learned corrections when runtime proves classification wrong.
-
-    E.g. a query classified as "simple" that took >30s and used 5 tool calls
-    gets reclassified as "complex" here, avoiding repeated misrouting.
-    """
-
     def __init__(self) -> None:
         self._upgrades: OrderedDict[str, ClassificationResult] = OrderedDict()
         self._downgrades: OrderedDict[str, ClassificationResult] = OrderedDict()
@@ -110,8 +134,6 @@ class _ClassifierCache:
 
 
 class _AdaptiveBudget:
-    """Runtime budget thresholds for auto-upgrade/downgrade decisions."""
-
     MAX_SIMPLE_ITERATIONS: int = 10
     MAX_SIMPLE_TOOL_CALLS: int = 4
     MAX_SIMPLE_TIME_SEC: float = 30.0
@@ -184,14 +206,298 @@ _SIMPLE_RULES: list[tuple[str, int]] = [
 
 
 # ---------------------------------------------------------------------------
-# Query length / structure heuristics
+# ClassifierGraph — LangGraph-native classification pipeline
 # ---------------------------------------------------------------------------
 
+class ClassifierGraph:
+    """LangGraph-native query classifier with tiered adaptive routing.
+
+    Usage:
+        classifier = ClassifierGraph()
+        label = classifier.classify("分析销售数据并生成图表")
+        # → "complex"
+    """
+
+    def __init__(self, checkpointer: Any | None = None) -> None:
+        if checkpointer is None:
+            checkpointer = MemorySaver()
+        self._checkpointer = checkpointer
+        self._graph = self._build_graph()
+
+    def _build_graph(self) -> Any:
+        graph = StateGraph(ClassifierState)
+
+        graph.add_node("normalize", self._node_normalize)
+        graph.add_node("check_learned", self._node_check_learned)
+        graph.add_node("check_cache", self._node_check_cache)
+        graph.add_node("apply_heuristics", self._node_apply_heuristics)
+        graph.add_node("keyword_score", self._node_keyword_score)
+        graph.add_node("heuristic_fallback", self._node_heuristic_fallback)
+
+        graph.add_edge(START, "normalize")
+        graph.add_edge("normalize", "check_learned")
+
+        graph.add_conditional_edges(
+            "check_learned",
+            self._route_after_learned,
+            {
+                "hit": END,
+                "miss": "check_cache",
+            },
+        )
+
+        graph.add_conditional_edges(
+            "check_cache",
+            self._route_after_cache,
+            {
+                "hit": END,
+                "miss": "apply_heuristics",
+            },
+        )
+
+        graph.add_conditional_edges(
+            "apply_heuristics",
+            self._route_after_heuristics,
+            {
+                "hit": END,
+                "miss": "keyword_score",
+            },
+        )
+
+        graph.add_conditional_edges(
+            "keyword_score",
+            self._route_after_keyword,
+            {
+                "hit": END,
+                "low_conf": "heuristic_fallback",
+            },
+        )
+
+        graph.add_edge("heuristic_fallback", END)
+
+        return graph.compile(checkpointer=self._checkpointer)
+
+    def classify(self, user_input: str) -> str:
+        initial: ClassifierState = {
+            "user_input": user_input,
+            "normalized_text": "",
+            "cache_key": "",
+            "label": "",
+            "confidence": 0.0,
+            "source": "",
+            "detail": "",
+        }
+
+        config = {"configurable": {"thread_id": f"classify_{hash(user_input) & 0xFFFFFFFF}"}}
+
+        try:
+            final = self._graph.invoke(initial, config=config)
+        except Exception as exc:
+            logger.error("[Classifier] Graph error: %s", exc, exc_info=True)
+            return "complex"
+
+        label = final.get("label", "")
+        if not label:
+            return "complex"
+        return label
+
+    def record_feedback(
+        self,
+        user_input: str,
+        original_label: str,
+        iterations: int = 0,
+        tool_calls: int = 0,
+        elapsed: float = 0.0,
+        steps_executed: int = 0,
+    ) -> str | None:
+        key = _cache_key(user_input)
+        changed = False
+        new_label: str | None = None
+
+        if original_label == "simple" and _BUDGET.exceeded_simple_budget(iterations, tool_calls, elapsed):
+            reason = f"budget_exceeded: iter={iterations} tools={tool_calls} time={elapsed:.1f}s"
+            _LEARNED.record_upgrade(key, reason)
+            _CACHE.put(key, ClassificationResult(
+                label="complex", confidence=0.9, source="learned_upgrade", detail=reason,
+            ))
+            new_label = "complex"
+            changed = True
+
+        elif original_label == "complex" and _BUDGET.can_downgrade_complex(steps_executed, elapsed):
+            reason = f"under_budget: steps={steps_executed} time={elapsed:.1f}s"
+            _LEARNED.record_downgrade(key, reason)
+            _CACHE.put(key, ClassificationResult(
+                label="simple", confidence=0.9, source="learned_downgrade", detail=reason,
+            ))
+            new_label = "simple"
+            changed = True
+
+        if changed:
+            logger.info(
+                "[Classifier] feedback: %s -> %s (orig=%s, iter=%d, tools=%d, time=%.1fs, steps=%d)",
+                user_input[:40], new_label, original_label, iterations, tool_calls, elapsed, steps_executed,
+            )
+            return new_label
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Graph nodes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _node_normalize(state: ClassifierState) -> dict[str, Any]:
+        user_input = state.get("user_input", "")
+        normalized = " ".join(user_input.lower().split())
+        cache_key = normalized
+        return {
+            "normalized_text": normalized,
+            "cache_key": cache_key,
+        }
+
+    @staticmethod
+    def _node_check_learned(state: ClassifierState) -> dict[str, Any]:
+        key = state.get("cache_key", "")
+        entry = _LEARNED.get(key)
+        if entry is not None:
+            return {
+                "label": entry.label,
+                "confidence": entry.confidence,
+                "source": entry.source,
+                "detail": entry.detail,
+            }
+        return {}
+
+    @staticmethod
+    def _node_check_cache(state: ClassifierState) -> dict[str, Any]:
+        key = state.get("cache_key", "")
+        entry = _CACHE.get(key)
+        if entry is not None:
+            logger.debug("[Classifier] cache hit: %s (conf=%.2f)", entry.label, entry.confidence)
+            return {
+                "label": entry.label,
+                "confidence": entry.confidence,
+                "source": entry.source,
+                "detail": entry.detail,
+            }
+        return {}
+
+    @staticmethod
+    def _node_apply_heuristics(state: ClassifierState) -> dict[str, Any]:
+        text = state.get("normalized_text", "")
+
+        result = _length_heuristic(text)
+        if result is not None:
+            return {
+                "label": result.label,
+                "confidence": result.confidence,
+                "source": result.source,
+                "detail": result.detail,
+            }
+
+        result = _multi_signal_detection(text)
+        if result is not None:
+            return {
+                "label": result.label,
+                "confidence": result.confidence,
+                "source": result.source,
+                "detail": result.detail,
+            }
+
+        return {}
+
+    @staticmethod
+    def _node_keyword_score(state: ClassifierState) -> dict[str, Any]:
+        text = state.get("normalized_text", "")
+        result = _classify_via_keywords(text)
+        if result is not None and result.confidence >= 0.5:
+            return {
+                "label": result.label,
+                "confidence": result.confidence,
+                "source": result.source,
+                "detail": result.detail,
+            }
+        return {}
+
+    @staticmethod
+    def _node_heuristic_fallback(state: ClassifierState) -> dict[str, Any]:
+        text = state.get("normalized_text", "")
+        result = _heuristic_fallback(text)
+        return {
+            "label": result.label,
+            "confidence": result.confidence,
+            "source": result.source,
+            "detail": result.detail,
+        }
+
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _route_after_learned(state: ClassifierState) -> str:
+        if state.get("label"):
+            _CACHE.put(state["cache_key"], ClassificationResult(
+                label=state["label"], confidence=state.get("confidence", 0.0),
+                source=state.get("source", ""), detail=state.get("detail", ""),
+            ))
+            return "hit"
+        return "miss"
+
+    @staticmethod
+    def _route_after_cache(state: ClassifierState) -> str:
+        if state.get("label"):
+            return "hit"
+        return "miss"
+
+    @staticmethod
+    def _route_after_heuristics(state: ClassifierState) -> str:
+        if state.get("label"):
+            _CACHE.put(state["cache_key"], ClassificationResult(
+                label=state["label"], confidence=state.get("confidence", 0.0),
+                source=state.get("source", ""), detail=state.get("detail", ""),
+            ))
+            return "hit"
+        return "miss"
+
+    @staticmethod
+    def _route_after_keyword(state: ClassifierState) -> str:
+        if state.get("label") and state.get("confidence", 0.0) >= 0.5:
+            _CACHE.put(state["cache_key"], ClassificationResult(
+                label=state["label"], confidence=state.get("confidence", 0.0),
+                source=state.get("source", ""), detail=state.get("detail", ""),
+            ))
+            return "hit"
+        if state.get("label"):
+            _CACHE.put(state["cache_key"], ClassificationResult(
+                label=state["label"], confidence=state.get("confidence", 0.0),
+                source=state.get("source", ""), detail=state.get("detail", ""),
+            ))
+            return "hit"
+        return "low_conf"
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton and backward-compatible API
+# ---------------------------------------------------------------------------
+
+_classifier_graph: ClassifierGraph | None = None
+
+
+def _get_classifier() -> ClassifierGraph:
+    global _classifier_graph
+    if _classifier_graph is None:
+        _classifier_graph = ClassifierGraph()
+    return _classifier_graph
+
+
+def _cache_key(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def _length_heuristic(text: str) -> ClassificationResult | None:
-    """Short queries with no action verbs are almost always simple."""
     chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
     total_chars = len(text.replace(" ", ""))
-
     if total_chars <= 6 and chinese_chars <= 4:
         return ClassificationResult(
             label="simple",
@@ -203,11 +509,6 @@ def _length_heuristic(text: str) -> ClassificationResult | None:
 
 
 def _multi_signal_detection(text: str) -> ClassificationResult | None:
-    """Detect queries that imply multiple actions without explicit keywords.
-
-    E.g. "help me search the web and then summarize" — no complex keyword,
-    but "and then" signals multi-step intent.
-    """
     multi_step_markers = [
         "然后", "之后", "接着", "再", "并且", "同时",
         " and ", " then ", " after that ", "next,",
@@ -224,10 +525,6 @@ def _multi_signal_detection(text: str) -> ClassificationResult | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Core classification logic
-# ---------------------------------------------------------------------------
-
 def _keyword_score(text: str, rules: list[tuple[str, int]]) -> tuple[int, list[str]]:
     score = 0
     matched: list[str] = []
@@ -236,10 +533,6 @@ def _keyword_score(text: str, rules: list[tuple[str, int]]) -> tuple[int, list[s
             score += weight
             matched.append(kw)
     return score, matched
-
-
-def _cache_key(text: str) -> str:
-    return " ".join(text.lower().split())
 
 
 def _classify_via_keywords(text: str) -> ClassificationResult | None:
@@ -294,13 +587,6 @@ def _classify_via_keywords(text: str) -> ClassificationResult | None:
 
 
 def _heuristic_fallback(text: str) -> ClassificationResult:
-    """Smart heuristic when keyword scoring is inconclusive.
-
-    Checks multiple signals without calling LLM:
-    - Multi-step markers (already detected earlier)
-    - Sentence structure complexity
-    - Action verb density
-    """
     action_verbs = [
         "分析", "对比", "研究", "查", "调查", "开发", "创建", "构建",
         "修复", "调试", "优化", "重构", "集成", "部署", "安装",
@@ -351,64 +637,12 @@ def _heuristic_fallback(text: str) -> ClassificationResult:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API (delegates to ClassifierGraph)
 # ---------------------------------------------------------------------------
 
 def classify_query(user_input: str) -> str:
-    """Classify query complexity with three-tier adaptive strategy.
-
-    Tier 1: Learned corrections (feedback from past runs)
-    Tier 2: Keyword + heuristic scoring
-    Tier 3: Smart heuristic fallback (no LLM call needed)
-    """
-    key = _cache_key(user_input)
-
-    learned = _LEARNED.get(key)
-    if learned is not None:
-        logger.info("[Classifier] learned: %s (src=%s)", learned.label, learned.source)
-        return learned.label
-
-    cached = _CACHE.get(key)
-    if cached is not None:
-        logger.debug("[Classifier] cache hit: %s (conf=%.2f)", cached.label, cached.confidence)
-        return cached.label
-
-    text = user_input.strip().lower()
-
-    heuristic_result = _length_heuristic(text)
-    if heuristic_result is not None:
-        _CACHE.put(key, heuristic_result)
-        logger.info(
-            "[Classifier] heuristic: %s conf=%.2f (%s)",
-            heuristic_result.label, heuristic_result.confidence, heuristic_result.detail,
-        )
-        return heuristic_result.label
-
-    multi_result = _multi_signal_detection(text)
-    if multi_result is not None:
-        _CACHE.put(key, multi_result)
-        logger.info(
-            "[Classifier] multi-signal: %s conf=%.2f",
-            multi_result.label, multi_result.confidence,
-        )
-        return multi_result.label
-
-    kw_result = _classify_via_keywords(text)
-    if kw_result is not None and kw_result.confidence >= 0.5:
-        _CACHE.put(key, kw_result)
-        logger.info(
-            "[Classifier] keyword: %s conf=%.2f hits=%s",
-            kw_result.label, kw_result.confidence, kw_result.detail,
-        )
-        return kw_result.label
-
-    fallback_result = _heuristic_fallback(text)
-    _CACHE.put(key, fallback_result)
-    logger.info(
-        "[Classifier] heuristic: %s conf=%.2f (%s)",
-        fallback_result.label, fallback_result.confidence, fallback_result.detail,
-    )
-    return fallback_result.label
+    classifier = _get_classifier()
+    return classifier.classify(user_input)
 
 
 def record_feedback(
@@ -419,44 +653,18 @@ def record_feedback(
     elapsed: float = 0.0,
     steps_executed: int = 0,
 ) -> str | None:
-    """Report runtime execution metrics to learn better classifications.
-
-    Returns the new label if reclassified, or None if no change needed.
-    """
-    key = _cache_key(user_input)
-    changed = False
-    new_label: str | None = None
-
-    if original_label == "simple" and _BUDGET.exceeded_simple_budget(iterations, tool_calls, elapsed):
-        reason = f"budget_exceeded: iter={iterations} tools={tool_calls} time={elapsed:.1f}s"
-        _LEARNED.record_upgrade(key, reason)
-        _CACHE.put(key, ClassificationResult(
-            label="complex", confidence=0.9, source="learned_upgrade", detail=reason,
-        ))
-        new_label = "complex"
-        changed = True
-
-    elif original_label == "complex" and _BUDGET.can_downgrade_complex(steps_executed, elapsed):
-        reason = f"under_budget: steps={steps_executed} time={elapsed:.1f}s"
-        _LEARNED.record_downgrade(key, reason)
-        _CACHE.put(key, ClassificationResult(
-            label="simple", confidence=0.9, source="learned_downgrade", detail=reason,
-        ))
-        new_label = "simple"
-        changed = True
-
-    if changed:
-        logger.info(
-            "[Classifier] feedback: %s -> %s (orig=%s, iter=%d, tools=%d, time=%.1fs, steps=%d)",
-            user_input[:40], new_label, original_label, iterations, tool_calls, elapsed, steps_executed,
-        )
-        return new_label
-
-    return None
+    classifier = _get_classifier()
+    return classifier.record_feedback(
+        user_input=user_input,
+        original_label=original_label,
+        iterations=iterations,
+        tool_calls=tool_calls,
+        elapsed=elapsed,
+        steps_executed=steps_executed,
+    )
 
 
 def get_budget() -> _AdaptiveBudget:
-    """Get current adaptive budget thresholds for tuning."""
     return _BUDGET
 
 
@@ -466,7 +674,6 @@ def set_budget(
     max_simple_time_sec: float | None = None,
     min_complex_steps: int | None = None,
 ) -> None:
-    """Override adaptive budget thresholds at runtime."""
     if max_simple_iterations is not None:
         _BUDGET.MAX_SIMPLE_ITERATIONS = max_simple_iterations
     if max_simple_tool_calls is not None:
@@ -478,7 +685,6 @@ def set_budget(
 
 
 def clear_classifier() -> None:
-    """Clear all caches and learned classifications."""
     _CACHE.clear()
     _LEARNED.clear()
     logger.info("[Classifier] All caches cleared.")

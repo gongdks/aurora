@@ -330,7 +330,7 @@ def get_storage_info() -> dict[str, Any]:
             "llm_response": "LRU+TTL (global LLMCache)",
             "embedding": "LRU+TTL (per-provider cache)",
             "search_results": "LRU+TTL (LongTermMemory._search_cache)",
-            "tool_descriptions": "GraphOrchestrator._tools_desc",
+            "tool_descriptions": "GraphOrchestrator._build_tools_description()",
         },
         "architecture": "layered",
     }

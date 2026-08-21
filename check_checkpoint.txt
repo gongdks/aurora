@@ -1,0 +1,15 @@
+langgraph.checkpoint path: _NamespacePath(['D:\\AIWORK\\PythonProject\\.venv\\Lib\\site-packages\\langgraph\\checkpoint'])
+
+  - base (pkg=True)
+  - memory (pkg=True)
+  - serde (pkg=True)
+
+OK: MemorySaver works
+FAIL SqliteSaver: No module named 'langgraph.checkpoint.sqlite'
+
+Searching for SqliteSaver...
+  langgraph.checkpoint: OK -> []
+  langgraph.checkpoint.memory: OK -> ['BaseCheckpointSaver', 'InMemorySaver', 'MemorySaver']
+  langgraph.checkpoint.sqlite: No module named 'langgraph.checkpoint.sqlite'
+  langgraph_saver.sqlite: No module named 'langgraph_saver'
+  langgraph.checkpoint.base: OK -> ['BaseCheckpointSaver']

@@ -3,13 +3,13 @@
 Architecture:
   1. LangGraph StateGraph handles routing (classify → simple/complex),
      planning, execution loop, verification, and re-planning.
-  2. Each plan step executes via LangChain ReAct tool-calling executor.
+  2. Each plan step executes via LangGraph-native ToolExecutorGraph.
   3. Simple queries are auto-detected and routed to the fast ReAct path.
 
 Thread safety:
-  GraphOrchestrator uses threading.local() for per-run context,
-  so multiple AgentSession instances (or concurrent invoke() calls)
-  can run safely without blocking each other.
+  GraphOrchestrator passes per-run context through LangGraph's config
+  mechanism, so multiple AgentSession instances (or concurrent invoke()
+  calls) can run safely without blocking each other. No threading.local().
 
 Orchestration flow:
   classify → simple → react_fast → END
