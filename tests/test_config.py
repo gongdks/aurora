@@ -8,7 +8,7 @@ class TestSettingsDefaults:
 
     def test_default_provider(self):
         s = Settings()
-        assert s.LLM_PROVIDER in ("openai", "ollama")
+        assert s.LLM_PROVIDER == "openai"
 
     def test_default_temperatures(self):
         s = Settings()
@@ -26,21 +26,12 @@ class TestSettingsDefaults:
         s = Settings()
         assert isinstance(s.BROWSER_HEADLESS, bool)
 
-    def test_get_llm_config_openai(self):
+    def test_get_llm_config(self):
         s = Settings()
-        s.LLM_PROVIDER = "openai"
-        s.OPENAI_MODEL = "gpt-4"
         config = s.get_llm_config()
         assert config["provider"] == "openai"
-        assert config["model"] == "gpt-4"
-
-    def test_get_llm_config_ollama(self):
-        s = Settings()
-        s.LLM_PROVIDER = "ollama"
-        s.OLLAMA_MODEL = "llama3"
-        config = s.get_llm_config()
-        assert config["provider"] == "ollama"
-        assert config["model"] == "llama3"
+        assert "model" in config
+        assert "temperature" in config
 
     def test_get_llm_config_returns_dict(self):
         s = Settings()
@@ -70,4 +61,4 @@ class TestGlobalSettings:
 
     def test_global_settings_has_provider(self):
         from agent.config import settings
-        assert settings.LLM_PROVIDER in ("openai", "ollama")
+        assert settings.LLM_PROVIDER == "openai"

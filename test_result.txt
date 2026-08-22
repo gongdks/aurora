@@ -1,0 +1,46 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0 -- D:\AIProject\aurora\venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\AIProject\aurora
+configfile: pyproject.toml
+plugins: anyio-4.14.2, langsmith-0.11.1
+collecting ... collected 79 items
+
+tests/test_graph_orchestrator.py::TestReducers::test_merge_results_empty_updates PASSED [  1%]
+tests/test_graph_orchestrator.py::TestReducers::test_merge_results_tuple_updates PASSED [  2%]
+tests/test_graph_orchestrator.py::TestReducers::test_merge_results_dict_updates PASSED [  3%]
+tests/test_graph_orchestrator.py::TestReducers::test_merge_results_auto_extend PASSED [  5%]
+tests/test_graph_orchestrator.py::TestReducers::test_pending_parallel_reduce_set_and_decrement PASSED [  6%]
+tests/test_graph_orchestrator.py::TestReducers::test_pending_parallel_reduce_zero_floor PASSED [  7%]
+tests/test_graph_orchestrator.py::TestReducers::test_sum_complex_steps PASSED [  8%]
+tests/test_graph_orchestrator.py::TestAgentState::test_state_has_required_keys PASSED [ 10%]
+tests/test_graph_orchestrator.py::TestAgentState::test_state_optional_keys PASSED [ 11%]
+tests/test_graph_orchestrator.py::TestAgentState::test_state_reducer_fields_exist PASSED [ 12%]
+tests/test_graph_orchestrator.py::TestGraphOrchestratorInit::test_init_without_errors PASSED [ 13%]
+tests/test_graph_orchestrator.py::TestGraphOrchestratorInit::test_graph_structure_info PASSED [ 15%]
+tests/test_graph_orchestrator.py::TestGraphOrchestratorInit::test_graph_has_correct_edges PASSED [ 16%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_classify_simple PASSED [ 17%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_classify_complex PASSED [ 18%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_classify_multi_agent PASSED [ 20%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_classify_default PASSED [ 21%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_adaptive_simple PASSED [ 22%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_adaptive_complex PASSED [ 24%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_reflect_done PASSED [ 25%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_reflect_no_replan PASSED [ 26%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_reflect_should_replan PASSED [ 27%]
+tests/test_graph_orchestrator.py::TestRoutingLogic::test_route_after_reflect_max_rounds PASSED [ 29%]
+tests/test_graph_orchestrator.py::TestMultiAgentIntegration::test_enable_multi_agent_mode PASSED [ 30%]
+tests/test_graph_orchestrator.py::TestMultiAgentIntegration::test_classify_routes_to_multi_agent PASSED [ 31%]
+tests/test_graph_orchestrator.py::TestMultiAgentIntegration::test_classify_does_not_route_to_multi_agent_when_disabled PASSED [ 32%]
+tests/test_graph_orchestrator.py::TestMultiAgentIntegration::test_classify_routes_simple_query_to_simple PASSED [ 34%]
+tests/test_graph_orchestrator.py::TestMultiAgentIntegration::test_node_multi_agent_execute_handles_cancel PASSED [ 35%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_plan_creates_plan PASSED [ 36%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_react_fast_returns_result PASSED [ 37%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_adaptive_check_passes_when_ok PASSED [ 39%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_adaptive_check_upgrades_when_exceeded PASSED [ 40%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_dispatch_all_steps_done PASSED [ 41%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_dispatch_serial_step PASSED [ 43%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_dispatch_parallel_sends PASSED [ 44%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_check_steps_waits_for_parallel PASSED [ 45%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_check_steps_advances PASSED [ 46%]
+tests/test_graph_orchestrator.py::TestPlanAndExecuteFlow::test_node_check_steps_all_done PASSED [ 48%]

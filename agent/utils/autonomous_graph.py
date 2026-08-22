@@ -252,8 +252,13 @@ class AutonomousGraph:
             checkpointer = MemorySaver()
         self._checkpointer = checkpointer
 
-        self.graph = self._build_graph()
+        self._compiled_graph = self._build_graph()
         logger.info("[AutoGraph] LangGraph-based engine ready (TypedState + reducers)")
+
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose compiled graph for subgraph composition."""
+        return self._compiled_graph
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -597,7 +602,7 @@ class AutonomousGraph:
         config = {"configurable": {"thread_id": f"autonomous_{id(self)}"}}
 
         try:
-            final = self.graph.invoke(initial, config=config)
+            final = self._compiled_graph.invoke(initial, config=config)
             self._cycle_count = final.get("cycle_count", self._cycle_count)
             self._active_goal_id = final.get("active_goal_id")
             self._last_events = final.get("events", [])
@@ -663,7 +668,7 @@ class AutonomousGraph:
             initial["stop_requested"] = True
             config = {"configurable": {"thread_id": f"autonomous_stop_{id(self)}"}}
             try:
-                self.graph.invoke(initial, config=config)
+                self._compiled_graph.invoke(initial, config=config)
             except Exception:
                 pass
         self._running = False

@@ -1,22 +1,24 @@
 """GraphOrchestrator — pure LangGraph Plan-and-Execute orchestration.
 
-Architecture (LangGraph StateGraph + Checkpointer + Command + Send):
+Architecture (LangGraph StateGraph + Checkpointer + Command + Send + Subgraphs):
 
   ┌──────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
   │ classify  │───→│ react_fast   │───→│ adaptive_chk │───→│   END    │
-  └────┬─────┘    └──────────────┘    └──────┬───────┘    └──────────┘
-       │ complex                              │ upgrade
-       ▼                                      ▼
+  └────┬─────┘    └──────┬───────┘    └──────┬───────┘    └──────────┘
+       │ complex         │                    │ upgrade
+       ▼                 ▼                    ▼
   ┌──────────┐    ┌──────────────┐    ┌──────────────┐
   │   plan    │───→│  dispatch    │───→│ execute_step │ ──┐
-  └──────────┘    └──────┬───────┘    └──────────────┘   │
-                   Send/Command                        │
-                        │                              │
-                        ▼                              ▼
-                   ┌──────────────┐              ┌──────────┐
-                   │  verify       │←─────────────│check_steps│
-                   └──────┬───────┘              └──────────┘
-                          │
+  └──────────┘    └──────┬───────┘    └──────┬───────┘   │
+                   Send(fan-out)             │            │
+                        │                    │            │
+                        ▼                    ▼            ▼
+                   ┌──────────────┐    ┌──────────────────────┐
+                   │  verify       │←──│  check_steps (fan-in) │
+                   └──────┬───────┘    └──────────────────────┘
+                          │                    │
+                          │         pending>0 → END (wait)
+                          │         pending=0 → dispatch / verify
                           ▼
                    ┌──────────────┐    complete ┌──────┐
                    │  reflect     │────────────→│ END  │
@@ -27,16 +29,20 @@ Architecture (LangGraph StateGraph + Checkpointer + Command + Send):
                      │ re_plan  │──→ dispatch
                      └──────────┘
 
+Subgraphs (shared checkpointer):
+  • ToolExecutorGraph  — Tool execution with reason/act/observe loop
+  • ReflectionEngine   — Multi-layered self-evaluation + strategy adjustment
+
 Key LangGraph features leveraged:
-  1. StateGraph with proper TypedDict state
-  2. SQLite checkpointer for state persistence across sessions
+  1. StateGraph with proper TypedDict state + Annotated reducers
+  2. SQLite shared checkpointer for state persistence across subgraphs
   3. Command(goto=...) for clean loop control
-  4. Send API for parallel execution of independent plan steps
-  5. Conditional edges only for non-loop branching decisions
-  6. Streaming via stream() API with native stream modes
-  7. interrupt/resume support for human-in-the-loop
-  8. Config-based runtime context (no threading.local())
-  9. Native usage metadata for token tracking
+  4. Send API for true parallel fan-out/fan-in of plan steps
+  5. Subgraph composition with shared checkpoints (ToolExecutorGraph, ReflectionEngine)
+  6. Config-based runtime context (no threading.local())
+  7. Streaming via stream() API with native stream modes
+  8. Checkpoint resume capability
+  9. ToolNode-based tool execution engine
 
 Thread safety:
   Runtime context is passed via LangGraph's config mechanism,
@@ -60,6 +66,7 @@ import time
 from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command, Send
@@ -75,8 +82,8 @@ from agent.utils.skill_store import SkillStore
 from agent.utils.autonomous_graph import AutonomousGraph, Goal
 from agent.utils.multi_agent_graph import MultiAgentGraph, create_default_roles
 from agent.utils.retry import CancelledError
-from agent.utils.tool_executor_graph import ToolExecutorGraph, create_tool_executor
-from agent.tools.registry import list_tools, ToolRouter
+from agent.utils.tool_executor_graph import ToolExecutorGraph
+from agent.tools.registry import list_tools
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,8 @@ _CHECKPOINT_DIR = os.path.join(
 
 
 def _merge_results(existing: list, updates: list) -> list:
+    if not updates:
+        return []
     merged = list(existing)
     for item in updates:
         if isinstance(item, tuple) and len(item) == 2:
@@ -105,6 +114,10 @@ def _merge_results(existing: list, updates: list) -> list:
 
 def _sum_complex_steps(existing: int, updates: int) -> int:
     return existing + updates
+
+
+def _pending_parallel_reduce(existing: int, updates: int) -> int:
+    return max(0, existing + updates)
 
 
 class AgentState(TypedDict, total=False):
@@ -135,6 +148,7 @@ class AgentState(TypedDict, total=False):
     reflection_confidence: float
     max_plan_rounds: int
     parallel_execution: bool
+    pending_parallel: Annotated[int, _pending_parallel_reduce]
 
 
 class _NodeContext:
@@ -163,18 +177,6 @@ class _NodeContext:
     @property
     def llm(self) -> Any:
         return self._cfg.get("llm")
-
-    @property
-    def tool_executor(self) -> ToolExecutorGraph | None:
-        return self._cfg.get("tool_executor")
-
-    @tool_executor.setter
-    def tool_executor(self, value: ToolExecutorGraph) -> None:
-        self._cfg["tool_executor"] = value
-
-    @property
-    def scene_executors(self) -> dict[str, ToolExecutorGraph]:
-        return self._cfg.setdefault("scene_executors", {})
 
     def is_cancelled(self) -> bool:
         ce = self.cancel_event
@@ -219,12 +221,23 @@ class GraphOrchestrator:
             self._llm_provider = create_llm()
             self._llm = self._llm_provider.get_model()
 
-        self._tool_router = ToolRouter()
-        self._reflection_engine = ReflectionEngine(llm=self._llm)
         self._skill_store = SkillStore()
         self._skill_learner_graph = SkillLearnerGraph(store=self._skill_store)
 
         self._checkpointer = self._init_checkpointer()
+
+        self._reflection_engine = ReflectionEngine(
+            llm=self._llm,
+            checkpointer=self._checkpointer,
+        )
+
+        self._tool_executor = ToolExecutorGraph(
+            llm=self._llm,
+            tools=list_tools(),
+            scene="plan_execute",
+            checkpointer=self._checkpointer,
+            max_iterations=settings.MAX_ITERATIONS,
+        )
 
         self._autonomous_graph = AutonomousGraph(
             llm=self._llm,
@@ -249,7 +262,7 @@ class GraphOrchestrator:
             self._graph = None
 
         logger.info(
-            "[GraphOrch] LangGraph ready | LLM: %s | features: [checkpointer, command, send, config]",
+            "[GraphOrch] LangGraph ready | LLM: %s | features: [checkpointer, command, send, subgraph, config]",
             self._llm_provider.model_name,
         )
 
@@ -271,38 +284,20 @@ class GraphOrchestrator:
         if self._current_cancel_event is not None:
             self._current_cancel_event.set()
 
-    def _get_or_build_executor(
-        self, ctx: _NodeContext, scene: str | None = None
-    ) -> ToolExecutorGraph:
-        if not scene:
-            te = ctx.tool_executor
-            if te is None:
-                te = create_tool_executor(llm=ctx.llm)
-                ctx.tool_executor = te
-            return te
-
-        executors = ctx.scene_executors
-        if scene not in executors:
-            executors[scene] = create_tool_executor(
-                llm=ctx.llm,
-                scene=scene,
-            )
-        return executors[scene]
-
     def _build_graph(self) -> Any:
         graph = StateGraph(AgentState)
 
-        graph.add_node("classify", lambda state, config: self._node_classify(state, config))
-        graph.add_node("react_fast", lambda state, config: self._node_react_fast(state, config))
-        graph.add_node("adaptive_check", lambda state, config: self._node_adaptive_check(state, config))
-        graph.add_node("plan", lambda state, config: self._node_plan(state, config))
-        graph.add_node("dispatch", lambda state, config: self._node_dispatch(state, config))
-        graph.add_node("execute_step", lambda state, config: self._node_execute_step(state, config))
-        graph.add_node("parallel_execute_step", lambda state, config: self._node_parallel_execute_step(state, config))
-        graph.add_node("check_steps", lambda state, config: self._node_check_steps(state, config))
-        graph.add_node("verify", lambda state, config: self._node_verify(state, config))
-        graph.add_node("reflect", lambda state, config: self._node_reflect(state, config))
-        graph.add_node("re_plan", lambda state, config: self._node_re_plan(state, config))
+        graph.add_node("classify", self._node_classify)
+        graph.add_node("react_fast", self._node_react_fast)
+        graph.add_node("adaptive_check", self._node_adaptive_check)
+        graph.add_node("plan", self._node_plan)
+        graph.add_node("dispatch", self._node_dispatch)
+        graph.add_node("execute_step", self._node_execute_step)
+        graph.add_node("check_steps", self._node_check_steps)
+        graph.add_node("verify", self._node_verify)
+        graph.add_node("reflect", self._node_reflect)
+        graph.add_node("re_plan", self._node_re_plan)
+        graph.add_node("multi_agent_execute", self._node_multi_agent_execute)
 
         graph.add_edge(START, "classify")
 
@@ -312,6 +307,7 @@ class GraphOrchestrator:
             {
                 "simple": "react_fast",
                 "complex": "plan",
+                "multi_agent": "multi_agent_execute",
             },
         )
 
@@ -327,8 +323,8 @@ class GraphOrchestrator:
         )
 
         graph.add_edge("plan", "dispatch")
+
         graph.add_edge("execute_step", "check_steps")
-        graph.add_edge("parallel_execute_step", "check_steps")
 
         graph.add_edge("verify", "reflect")
 
@@ -342,6 +338,8 @@ class GraphOrchestrator:
         )
 
         graph.add_edge("re_plan", "dispatch")
+
+        graph.add_edge("multi_agent_execute", END)
 
         return graph.compile(checkpointer=self._checkpointer)
 
@@ -383,6 +381,7 @@ class GraphOrchestrator:
                 "complex_elapsed": 0.0,
                 "max_plan_rounds": settings.MAX_PLAN_ROUNDS,
                 "parallel_execution": True,
+                "pending_parallel": 0,
             }
 
             config = {
@@ -465,6 +464,7 @@ class GraphOrchestrator:
                 "complex_elapsed": 0.0,
                 "max_plan_rounds": settings.MAX_PLAN_ROUNDS,
                 "parallel_execution": True,
+                "pending_parallel": 0,
             }
 
             config = {
@@ -539,52 +539,6 @@ class GraphOrchestrator:
             desc = (getattr(t, "description", "") or "")[:120]
             lines.append(f"- {name}: {desc}")
         return "\n".join(lines)
-
-    def _execute_step_with_tools(
-        self,
-        input_text: str,
-        chat_history_messages: list,
-        ctx: _NodeContext,
-        scene: str | None = None,
-    ) -> dict[str, Any]:
-        if not scene and input_text:
-            scene, _ = self._tool_router.smart_route(input_text)
-
-        executor = self._get_or_build_executor(ctx, scene)
-
-        try:
-            result = executor.execute(
-                input_text=input_text,
-                chat_history=chat_history_messages,
-                cancel_event=ctx.cancel_event,
-                progress_callback=ctx.progress_cb,
-                token_tracker=ctx.token_tracker,
-            )
-        except Exception as exc:
-            logger.error("[GraphOrch] Tool execution failed: %s", exc)
-            ctx.emit_log(f"⚠️ 工具执行失败: {exc}")
-            return {
-                "result": f"工具执行出错: {exc}",
-                "status": "error",
-                "iterations": 0,
-                "time": 0.0,
-                "hit_limit": False,
-                "tool_calls": 0,
-                "llm_calls": 0,
-            }
-
-        if ctx.is_cancelled() or result.get("status") == "cancelled":
-            return {
-                "result": "⏹ 已停止",
-                "status": "cancelled",
-                "iterations": 0,
-                "time": 0.0,
-                "hit_limit": False,
-                "tool_calls": 0,
-                "llm_calls": 0,
-            }
-
-        return result
 
     def _record_complex_downgrade_feedback(self, final_state: AgentState) -> None:
         classification = final_state.get("classification", "")
@@ -702,6 +656,52 @@ class GraphOrchestrator:
 
         return steps, parallel_groups
 
+    def _run_planning(
+        self,
+        ctx: _NodeContext,
+        state: AgentState,
+        *,
+        prompt: str,
+        fallback_plan: list[str],
+        log_prefix: str,
+        error_msg: str,
+        emit_plan_event: bool = True,
+    ) -> dict[str, Any]:
+        plan_rounds = state.get("plan_rounds", 0)
+        new_plan_rounds = plan_rounds + 1
+        user_input = state.get("user_input", "")
+
+        try:
+            plan_text = self._llm_invoke(prompt, ctx)
+            plan, parallel_groups = self._parse_plan_with_parallel(plan_text)
+        except Exception as exc:
+            logger.error("[GraphOrch] %s failed: %s", log_prefix, exc)
+            ctx.emit_log(f"⚠️ {error_msg}，使用备用计划")
+            plan = list(fallback_plan)
+            parallel_groups = []
+
+        if not plan:
+            plan = list(fallback_plan)
+            parallel_groups = []
+
+        ctx.emit_log(f"📋 {log_prefix}: {len(plan)} 个步骤")
+        if emit_plan_event:
+            if parallel_groups:
+                ctx.emit_log(f"⚡ 检测到 {len(parallel_groups)} 组可并行步骤")
+            ctx.emit_plan(goal=user_input, steps=plan)
+        for i, step in enumerate(plan):
+            ctx.emit_log(f"  {i + 1}. {step[:120]}")
+
+        return {
+            "plan": plan,
+            "parallel_groups": parallel_groups,
+            "current_step": 0,
+            "results": [],
+            "parallel_results": {},
+            "plan_rounds": new_plan_rounds,
+            "pending_parallel": 0,
+        }
+
     @staticmethod
     def _extract_final_answer(
         verification: str, user_input: str, results: list[str]
@@ -738,26 +738,40 @@ class GraphOrchestrator:
 
         return f"任务已完成: {user_input}"
 
-    def _node_classify(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_classify(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         classification = classify_query(state["user_input"])
+
+        if self._use_multi_agent and classification == "complex":
+            user_input = state["user_input"]
+            if any(kw in user_input.lower() for kw in (
+                "团队", "协作", "分工", "角色", "多方面", "综合",
+                "分析", "设计", "开发", "研究",
+            )):
+                classification = "multi_agent"
+                ctx.emit_log(f"🔍 查询分类: {classification} (多 Agent 协作模式)")
+                return {"classification": classification}
+
         ctx.emit_log(f"🔍 查询分类: {classification}")
         return {"classification": classification}
 
-    def _node_react_fast(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_react_fast(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
 
         ctx.emit_log("⚡ 执行快速路径...")
 
-        exec_result = self._execute_step_with_tools(
-            state["user_input"],
-            state.get("chat_history_messages", []),
-            ctx,
+        exec_result = self._tool_executor.execute(
+            input_text=state["user_input"],
+            chat_history=state.get("chat_history_messages", []),
+            cancel_event=ctx.cancel_event,
+            progress_callback=ctx.progress_cb,
+            token_tracker=ctx.token_tracker,
+            config=config,
         )
 
         result_text = exec_result.get("result", "")
@@ -773,7 +787,7 @@ class GraphOrchestrator:
             "fast_hit_limit": exec_result.get("hit_limit", False),
         }
 
-    def _node_adaptive_check(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_adaptive_check(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -826,7 +840,7 @@ class GraphOrchestrator:
         )
         return {}
 
-    def _node_plan(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_plan(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -883,39 +897,22 @@ class GraphOrchestrator:
 
 只输出编号步骤，不要输出其他内容。"""
 
-        try:
-            plan_text = self._llm_invoke(prompt, ctx)
-        except Exception as exc:
-            logger.error("[GraphOrch] Plan generation failed: %s", exc)
-            ctx.emit_log("⚠️ 计划生成失败，使用备用计划")
-            plan_text = f"1. 分析请求: {user_input}\n2. 执行所需操作\n3. 总结结果"
+        fallback_plan = [
+            f"分析请求: {user_input}",
+            "执行所需操作",
+            "总结结果",
+        ]
 
-        plan, parallel_groups = self._parse_plan_with_parallel(plan_text)
+        return self._run_planning(
+            ctx, state,
+            prompt=prompt,
+            fallback_plan=fallback_plan,
+            log_prefix="计划已创建",
+            error_msg="计划生成失败",
+            emit_plan_event=True,
+        )
 
-        if not plan:
-            plan = [
-                f"分析请求: {user_input}",
-                "执行所需操作",
-                "总结结果",
-            ]
-            parallel_groups = []
-
-        ctx.emit_log(f"📋 计划已创建: {len(plan)} 个步骤")
-        if parallel_groups:
-            ctx.emit_log(f"⚡ 检测到 {len(parallel_groups)} 组可并行步骤")
-        ctx.emit_plan(goal=user_input, steps=plan)
-        for i, step in enumerate(plan):
-            ctx.emit_log(f"  {i + 1}. {step[:120]}")
-
-        return {
-            "plan": plan,
-            "parallel_groups": parallel_groups,
-            "current_step": 0,
-            "results": [],
-            "parallel_results": {},
-        }
-
-    def _node_execute_step(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_execute_step(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -948,6 +945,20 @@ class GraphOrchestrator:
         graph_context = state.get("graph_context", "")
         chat_history = state.get("chat_history_messages", [])
 
+        chat_debug = []
+        for m in chat_history:
+            cls_name = type(m).__name__
+            mtype = getattr(m, "type", "?")
+            content = getattr(m, "content", "")
+            if isinstance(content, list):
+                content = str(content)[:80]
+            elif isinstance(content, str):
+                content = content[:80]
+            else:
+                content = str(content)[:80]
+            chat_debug.append(f"{cls_name}({mtype}, len={len(str(content))})")
+        logger.info("[GraphOrch] execute_step: chat_history_msgs=[%s]", ", ".join(chat_debug))
+
         context_sections = []
         if graph_context:
             context_sections.append(f"之前的上下文:\n{graph_context[:1200]}")
@@ -964,12 +975,17 @@ class GraphOrchestrator:
 
 完成此步骤后，简要总结您做了什么以及发现了什么。"""
 
-        result = self._execute_step_with_tools(step_prompt, chat_history, ctx)
+        result = self._tool_executor.execute(
+            input_text=step_prompt,
+            chat_history=chat_history,
+            cancel_event=ctx.cancel_event,
+            progress_callback=ctx.progress_cb,
+            token_tracker=ctx.token_tracker,
+            config=config,
+        )
 
         result_text = result.get("result", "") if isinstance(result, dict) else str(result)
         result_text = self._truncate_output(result_text)
-
-        complex_steps = state.get("complex_steps_executed", 0) + 1
 
         ctx.emit_log(f"✅ 步骤 {current_step + 1} 完成: {result_text[:200]}")
         logger.info(
@@ -979,100 +995,24 @@ class GraphOrchestrator:
 
         return {
             "results": [(current_step, result_text)],
-            "complex_steps_executed": complex_steps,
+            "complex_steps_executed": 1,
+            "pending_parallel": -1,
         }
 
-    def _node_parallel_execute_step(self, state: AgentState, config: Any) -> dict[str, Any]:
-        ctx = _NodeContext(config)
-        if ctx.is_cancelled():
-            return {"result": "⏹ 已停止", "is_done": True}
-
-        current_step = state.get("current_step", 0)
-        plan = state.get("plan", [])
-        parallel_groups = state.get("parallel_groups", [])
-
-        logger.info(
-            "[GraphOrch] parallel_execute_step: current_step=%d, plan_len=%d",
-            current_step, len(plan),
-        )
-
-        parallel_indices = set()
-        for group in parallel_groups:
-            if current_step in group:
-                parallel_indices = set(group)
-                break
-
-        if not parallel_indices or len(parallel_indices) <= 1:
-            logger.info("[GraphOrch] parallel_execute_step: not a parallel group, skipping")
-            return {}
-
-        sorted_indices = sorted(parallel_indices)
-        logger.info("[GraphOrch] parallel_execute_step: executing steps %s", sorted_indices)
-
-        all_results = []
-        complex_steps = state.get("complex_steps_executed", 0)
-
-        for step_idx in sorted_indices:
-            if step_idx >= len(plan):
-                continue
-
-            step_description = plan[step_idx]
-            ctx.emit_log(f"▶️ 并行步骤 {step_idx + 1}/{len(plan)}: {step_description[:120]}")
-
-            exec_state = dict(state)
-            exec_state["current_step"] = step_idx
-
-            user_input = state.get("user_input", "")
-            graph_context = state.get("graph_context", "")
-            chat_history = state.get("chat_history_messages", [])
-
-            context_sections = []
-            if graph_context:
-                context_sections.append(f"之前的上下文:\n{graph_context[:1200]}")
-
-            step_prompt = f"""执行此步骤以实现用户目标。
-
-用户原始目标: {user_input}
-当前步骤: {step_description}
-{chr(10).join(context_sections)}
-
-使用可用工具执行所需操作。如果需要读取文件、搜索网页或运行代码，请立即使用相应工具。
-
-重要：您必须使用中文回复。用中文思考和回复。
-
-完成此步骤后，简要总结您做了什么以及发现了什么。"""
-
-            result = self._execute_step_with_tools(step_prompt, chat_history, ctx)
-
-            result_text = result.get("result", "") if isinstance(result, dict) else str(result)
-            result_text = self._truncate_output(result_text)
-
-            all_results.append((step_idx, result_text))
-            complex_steps += 1
-
-            ctx.emit_log(f"✅ 并行步骤 {step_idx + 1} 完成: {result_text[:200]}")
-
-        logger.info(
-            "[GraphOrch] parallel_execute_step: completed %d steps",
-            len(all_results),
-        )
-
-        return {
-            "results": all_results,
-            "complex_steps_executed": complex_steps,
-        }
-
-    def _node_check_steps(self, state: AgentState, config: Any) -> Command:
+    def _node_check_steps(self, state: AgentState, config: RunnableConfig) -> Command:
         ctx = _NodeContext(config)
         plan = state.get("plan", [])
         current_step = state.get("current_step", 0)
-        parallel_groups = state.get("parallel_groups", [])
-        results = state.get("results", [])
+        pending_parallel = state.get("pending_parallel", 0)
 
         logger.info(
-            "[GraphOrch] check_steps: current_step=%d, plan_len=%d, results_count=%d",
-            current_step, len(plan), len(results),
+            "[GraphOrch] check_steps: current_step=%d, pending_parallel=%d, plan_len=%d",
+            current_step, pending_parallel, len(plan),
         )
+
+        if pending_parallel > 0:
+            ctx.emit_log(f"⏳ 等待 {pending_parallel} 个并行步骤完成...")
+            return Command(goto=END)
 
         if current_step >= len(plan):
             ctx.emit_log("📋 所有计划步骤已完成")
@@ -1080,16 +1020,18 @@ class GraphOrchestrator:
             return Command(goto="verify")
 
         next_step = current_step + 1
-        for group in parallel_groups:
-            if current_step in group:
-                next_step = max(group) + 1
-                ctx.emit_log(f"📋 并行组完成，推进到步骤 {next_step}")
-                break
+        parallel_execution = state.get("parallel_execution", True)
+        if parallel_execution:
+            for group in state.get("parallel_groups", []):
+                if current_step in group:
+                    next_step = max(group) + 1
+                    ctx.emit_log(f"📋 并行组完成，推进到步骤 {next_step}")
+                    break
 
         logger.info("[GraphOrch] check_steps: advancing to step %d", next_step)
         return Command(goto="dispatch", update={"current_step": next_step})
 
-    def _node_dispatch(self, state: AgentState, config: Any) -> Command:
+    def _node_dispatch(self, state: AgentState, config: RunnableConfig) -> Command:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return Command(goto="verify", update={"result": "⏹ 已停止", "is_done": True})
@@ -1109,11 +1051,12 @@ class GraphOrchestrator:
             logger.info("[GraphOrch] dispatch: all steps done, going to verify")
             return Command(goto="verify")
 
-        exec_state = self._build_exec_step_state(state, current_step)
-
         if not parallel_execution or not parallel_groups:
             logger.info("[GraphOrch] dispatch: serial step %d", current_step)
-            return Command(goto=Send("execute_step", exec_state))
+            return Command(
+                goto="execute_step",
+                update={"pending_parallel": 1},
+            )
 
         parallel_indices = set()
         for group in parallel_groups:
@@ -1123,14 +1066,22 @@ class GraphOrchestrator:
 
         if not parallel_indices or len(parallel_indices) <= 1:
             logger.info("[GraphOrch] dispatch: single step %d (no parallel group)", current_step)
-            return Command(goto=Send("execute_step", exec_state))
+            return Command(
+                goto="execute_step",
+                update={"pending_parallel": 1},
+            )
 
         sorted_indices = sorted(parallel_indices)
         ctx.emit_log(f"⚡ 并行调度 {len(sorted_indices)} 个步骤: {sorted_indices}")
-        logger.info("[GraphOrch] dispatch: parallel steps %s", sorted_indices)
+        logger.info("[GraphOrch] dispatch: true parallel steps %s", sorted_indices)
 
+        sends = [
+            Send("execute_step", self._build_exec_step_state(state, idx))
+            for idx in sorted_indices
+        ]
         return Command(
-            goto=Send("parallel_execute_step", self._build_exec_step_state(state, current_step))
+            goto=sends,
+            update={"pending_parallel": len(sorted_indices)},
         )
 
     @staticmethod
@@ -1146,7 +1097,7 @@ class GraphOrchestrator:
             "results": state.get("results", []),
         }
 
-    def _node_verify(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_verify(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         user_input = state.get("user_input", "")
         results = state.get("results", [])
@@ -1170,8 +1121,14 @@ class GraphOrchestrator:
         max_plan_rounds = state.get("max_plan_rounds", settings.MAX_PLAN_ROUNDS)
         if plan_rounds >= max_plan_rounds:
             logger.info("[GraphOrch] Max re-plan rounds (%d) reached, ending", plan_rounds)
-            ctx.emit_log("⚠️ 达到最大重新规划次数，结束执行")
-            return {"is_done": True}
+            ctx.emit_log("⚠️ 达到最大重新规划次数，接受当前结果")
+            if results:
+                final_answer = "\n\n".join(
+                    f"**结果 {i + 1}**: {r[:500]}" for i, r in enumerate(results)
+                )
+            else:
+                final_answer = f"任务已完成: {user_input}"
+            return {"result": final_answer, "is_done": True}
 
         ctx.emit_log("🔍 正在验证目标达成情况...")
 
@@ -1214,7 +1171,7 @@ class GraphOrchestrator:
                     "is_done": True,
                 }
 
-            if plan_rounds >= 2:
+            if plan_rounds >= max_plan_rounds:
                 ctx.emit_log("⚠️ 达到最大重新规划次数，接受当前结果")
                 final_answer = self._extract_final_answer(verification, user_input, results)
                 return {
@@ -1240,7 +1197,7 @@ class GraphOrchestrator:
                 "is_done": True,
             }
 
-    def _node_re_plan(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_re_plan(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -1290,33 +1247,59 @@ class GraphOrchestrator:
 
 请只输出编号步骤。"""
 
+        fallback_plan = [f"完成剩余工作: {user_input}"]
+
+        return self._run_planning(
+            ctx, state,
+            prompt=prompt,
+            fallback_plan=fallback_plan,
+            log_prefix="新计划",
+            error_msg="重新规划失败",
+            emit_plan_event=False,
+        )
+
+    def _node_multi_agent_execute(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        ctx = _NodeContext(config)
+        if ctx.is_cancelled():
+            return {"result": "⏹ 已停止", "is_done": True}
+
+        user_input = state.get("user_input", "")
+        ctx.emit_status("👥 启动多 Agent 协作...")
+        ctx.emit_log(f"📋 分解任务: {user_input[:80]}")
+
         try:
-            plan_text = self._llm_invoke(prompt, ctx)
-            new_plan, new_parallel = self._parse_plan_with_parallel(plan_text)
+            result = self._multi_agent_graph.invoke(user_input)
+
+            synthesis = result.get("synthesis", "")
+            results_list = result.get("role_results", [])
+            success_count = sum(1 for r in results_list if r.get("status") == "success")
+            total_count = len(results_list)
+
+            for r in results_list:
+                role = r.get("role", "unknown")
+                status = r.get("status", "unknown")
+                ctx.emit_log(f"  → [{role}]: {status}")
+
+            ctx.emit_log(
+                f"✅ 协作完成: {success_count}/{total_count} 角色成功"
+            )
+
+            return {
+                "result": synthesis or "(多 Agent 协作未产生结果)",
+                "is_done": True,
+                "complex_steps_executed": total_count,
+                "complex_elapsed": result.get("duration", 0.0),
+            }
+
         except Exception as exc:
-            logger.error("[GraphOrch] Re-plan failed: %s", exc)
-            ctx.emit_log("⚠️ 重新规划失败，使用简单替代方案")
-            new_plan = [f"完成剩余工作: {user_input}"]
-            new_parallel = []
+            logger.error("[GraphOrch] Multi-agent execution failed: %s", exc, exc_info=True)
+            ctx.emit_log(f"❌ 多 Agent 执行失败: {exc}")
+            return {
+                "result": f"多 Agent 执行失败: {exc}",
+                "is_done": True,
+            }
 
-        if not new_plan:
-            new_plan = [f"完成剩余工作: {user_input}"]
-            new_parallel = []
-
-        ctx.emit_log(f"📋 新计划: {len(new_plan)} 个步骤")
-        for i, step in enumerate(new_plan):
-            ctx.emit_log(f"  {i + 1}. {step[:120]}")
-
-        return {
-            "plan": new_plan,
-            "parallel_groups": new_parallel,
-            "current_step": 0,
-            "results": [],
-            "parallel_results": {},
-            "plan_rounds": new_plan_rounds,
-        }
-
-    def _node_reflect(self, state: AgentState, config: Any) -> dict[str, Any]:
+    def _node_reflect(self, state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         ctx = _NodeContext(config)
         if ctx.is_cancelled():
             return {"result": "⏹ 已停止", "is_done": True}
@@ -1349,12 +1332,13 @@ class GraphOrchestrator:
         }
 
         try:
-            reflection_result = self._reflection_engine.reflect(
+            reflection_result = self._reflection_engine.invoke(
                 user_input=user_input,
                 plan=plan,
                 results=results,
                 execution_metrics=execution_metrics,
                 previous_feedback=verification_feedback,
+                config=config,
             )
         except Exception as exc:
             logger.warning("[GraphOrch] Reflection failed: %s", exc)
@@ -1435,14 +1419,13 @@ class GraphOrchestrator:
             return "complete"
 
         should_replan = state.get("reflection_should_replan", False)
-        reflection_rounds = state.get("reflection_rounds", 0)
         plan_rounds = state.get("plan_rounds", 0)
         max_plan_rounds = state.get("max_plan_rounds", settings.MAX_PLAN_ROUNDS)
 
         if not should_replan:
             return "complete"
 
-        if reflection_rounds >= 2 or plan_rounds >= max_plan_rounds:
+        if plan_rounds >= max_plan_rounds:
             return "complete"
 
         return "replan"
@@ -1624,30 +1607,57 @@ class GraphOrchestrator:
 
     def graph_structure_info(self) -> dict[str, Any]:
         return {
-            "type": "StateGraph",
+            "type": "StateGraph (Plan-and-Execute)",
             "nodes": [
                 "classify", "react_fast", "adaptive_check",
                 "plan", "dispatch", "execute_step",
                 "check_steps", "verify", "reflect", "re_plan",
+                "multi_agent_execute",
+            ],
+            "subgraphs": [
+                {
+                    "name": "ToolExecutorGraph",
+                    "purpose": "Tool execution with reason/act/observe loop",
+                    "checkpointer": "shared (inherited from parent)",
+                    "integration": "called as subgraph via config",
+                },
+                {
+                    "name": "ReflectionEngine",
+                    "purpose": "Multi-layered self-evaluation",
+                    "checkpointer": "shared (inherited from parent)",
+                    "integration": "called as subgraph via config",
+                },
+                {
+                    "name": "MultiAgentGraph",
+                    "purpose": "Role-based parallel agent collaboration (researcher, analyst, executor)",
+                    "checkpointer": "shared (inherited from parent)",
+                    "integration": "routed from classify when multi-agent mode enabled",
+                },
             ],
             "edges": [
-                "classify → react_fast|plan",
+                "classify → react_fast|plan|multi_agent",
                 "react_fast → adaptive_check",
                 "adaptive_check → END|plan",
                 "plan → dispatch",
-                "dispatch → check_steps (via Send for parallel)",
-                "check_steps → dispatch|verify",
+                "dispatch → execute_step (serial) | Send(execute_step) (parallel) | verify (all done)",
+                "execute_step → check_steps",
+                "check_steps → END (wait for parallel) | dispatch (next step) | verify (all done)",
                 "verify → reflect",
                 "reflect → END|re_plan",
                 "re_plan → dispatch",
+                "multi_agent_execute → END",
             ],
             "features": [
-                "SqliteSaver checkpointer (persistent)",
-                "Send API for true parallel execution",
-                "ToolNode for native tool execution",
+                "SqliteSaver shared checkpointer (persistent across subgraphs)",
+                "Send API for true parallel fan-out/fan-in execution",
+                "Subgraph composition (ToolExecutorGraph, ReflectionEngine, MultiAgentGraph)",
+                "Shared checkpoints across graph hierarchy",
+                "Config-based runtime context (no threading.local)",
                 "Streaming via stream() API",
                 "Checkpoint resume capability",
-                "Config-based runtime context",
+                "ToolNode-based tool execution engine",
+                "Multi-agent role-based collaboration (researcher/analyst/executor)",
+                "Autonomous goal-driven execution with skill learning",
             ],
         }
 

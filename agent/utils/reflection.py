@@ -3,17 +3,14 @@
 Implements the Reflexion pattern using LangGraph StateGraph:
   Act → Observe → Reflect → Adjust → Re-act
 
-Three-layer reflection (each a graph node):
-  1. evaluate_scores: Multi-dimensional scoring of execution quality
-  2. analyze_steps: Per-step success/failure analysis
-  3. build_strategy: Generate adjustment plan and replan decision
-  4. store_learning: Persist patterns for cross-session learning
+Supports both standalone invocation and subgraph composition.
+When used as a subgraph, shares the parent's checkpointer.
 
-Key LangGraph features leveraged:
+Key LangGraph features:
   - StateGraph with typed state for clean data flow
   - Conditional edges to route based on score thresholds
-  - Checkpointer for state persistence
-  - Clear separation of concerns between evaluation layers
+  - Shared checkpointer for unified state persistence
+  - Subgraph composition support for embedding in parent graphs
 """
 
 from __future__ import annotations
@@ -76,6 +73,8 @@ class ReflectionState(TypedDict, total=False):
     confidence: float
     summary: str
     learning_key: str
+    failure_pattern_data: dict[str, Any] | None
+    success_strategy_data: dict[str, Any] | None
 
 
 def _extract_keywords(text: str) -> set[str]:
@@ -92,14 +91,16 @@ def _extract_keywords(text: str) -> set[str]:
 class ReflectionEngine:
     """Core reflexion engine — LangGraph-native evaluation and strategy adjustment.
 
-    Usage:
+    Supports both standalone invocation and subgraph composition.
+    When used as a subgraph, shares the parent's checkpointer and
+    can be embedded directly via compiled_graph property.
+
+    Usage (standalone):
         engine = ReflectionEngine()
-        result = engine.reflect(
-            user_input="分析销售数据",
-            plan=["加载数据", "计算增长率", "生成图表"],
-            results=["数据已加载", "增长率计算完成", "图表已生成"],
-            execution_metrics={"steps": 3, "tool_calls": 5, "time": 45.2},
-        )
+        result = engine.reflect(user_input="...", plan=[...], results=[...])
+
+    Usage (as subgraph):
+        main_graph.add_node("reflection", engine.compiled_graph)
     """
 
     def __init__(self, llm: Any = None, checkpointer: Any | None = None) -> None:
@@ -113,6 +114,11 @@ class ReflectionEngine:
             checkpointer = MemorySaver()
         self._checkpointer = checkpointer
         self._graph = self._build_graph()
+
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose compiled graph for subgraph composition."""
+        return self._graph
 
     def set_llm(self, llm: Any) -> None:
         self._llm = llm
@@ -153,6 +159,7 @@ class ReflectionEngine:
         results: list[str],
         execution_metrics: dict[str, Any] | None = None,
         previous_feedback: str = "",
+        config: dict[str, Any] | None = None,
     ) -> ReflectionResult:
         execution_metrics = execution_metrics or {}
 
@@ -172,10 +179,14 @@ class ReflectionEngine:
             "learning_key": "",
         }
 
-        config = {"configurable": {"thread_id": f"reflection_{hash(user_input) & 0xFFFFFFFF}"}}
+        run_config = config or {
+            "configurable": {
+                "thread_id": f"reflection_{hash(user_input) & 0xFFFFFFFF}",
+            }
+        }
 
         try:
-            final = self._graph.invoke(initial_state, config=config)
+            final = self._graph.invoke(initial_state, config=run_config)
         except Exception as exc:
             logger.error("[Reflection] Graph error: %s", exc, exc_info=True)
             return ReflectionResult(
@@ -183,6 +194,15 @@ class ReflectionEngine:
                 should_replan=True,
                 summary=f"反思执行出错: {exc}",
             )
+
+        failure_data = final.get("failure_pattern_data")
+        success_data = final.get("success_strategy_data")
+        if failure_data:
+            self._failure_patterns[failure_data.get("learning_key", "")] = failure_data
+            self._evict_patterns(self._failure_patterns)
+        if success_data:
+            self._success_strategies[success_data.get("learning_key", "")] = success_data
+            self._evict_patterns(self._success_strategies)
 
         scores_dict = final.get("scores", {})
         scores = ReflectionScore(
@@ -203,9 +223,28 @@ class ReflectionEngine:
             summary=final.get("summary", ""),
         )
 
-    # ------------------------------------------------------------------
-    # Graph nodes
-    # ------------------------------------------------------------------
+    def invoke(
+        self,
+        user_input: str,
+        plan: list[str],
+        results: list[str],
+        execution_metrics: dict[str, Any] | None = None,
+        previous_feedback: str = "",
+        config: dict[str, Any] | None = None,
+    ) -> ReflectionResult:
+        """Invoke reflection engine with optional parent config for subgraph integration.
+
+        When config is provided from the parent graph, the checkpointer is shared,
+        enabling unified state persistence across the graph hierarchy.
+        """
+        return self.reflect(
+            user_input=user_input,
+            plan=plan,
+            results=results,
+            execution_metrics=execution_metrics,
+            previous_feedback=previous_feedback,
+            config=config,
+        )
 
     def _node_evaluate_scores(self, state: ReflectionState) -> dict[str, Any]:
         plan = state.get("plan", [])
@@ -334,8 +373,11 @@ class ReflectionEngine:
         goal_completeness = scores.get("goal_completeness", 0.0)
         output_quality = scores.get("output_quality", 0.0)
 
+        failure_pattern = None
+        success_strategy = None
+
         if (overall < 0.5 or goal_completeness < 1.0 or output_quality < 0.2) and went_wrong:
-            self._failure_patterns[learning_key] = {
+            failure_pattern = {
                 "user_input": user_input[:200],
                 "scores": {
                     "goal": goal_completeness,
@@ -345,11 +387,11 @@ class ReflectionEngine:
                 "went_wrong": went_wrong[:5],
                 "adjustments": adjustments[:5],
                 "timestamp": now,
+                "learning_key": learning_key,
             }
-            self._evict_patterns(self._failure_patterns)
 
         if overall >= 0.7 and went_well:
-            self._success_strategies[learning_key] = {
+            success_strategy = {
                 "user_input": user_input[:200],
                 "scores": {
                     "goal": goal_completeness,
@@ -358,10 +400,13 @@ class ReflectionEngine:
                 },
                 "went_well": went_well[:5],
                 "timestamp": now,
+                "learning_key": learning_key,
             }
-            self._evict_patterns(self._success_strategies)
 
-        return {}
+        return {
+            "failure_pattern_data": failure_pattern,
+            "success_strategy_data": success_strategy,
+        }
 
     def _node_build_summary(self, state: ReflectionState) -> dict[str, Any]:
         scores = state.get("scores", {})
@@ -397,10 +442,6 @@ class ReflectionEngine:
 
         return {"summary": "\n".join(parts)}
 
-    # ------------------------------------------------------------------
-    # Routing
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _route_after_strategy(state: ReflectionState) -> str:
         scores = state.get("scores", {})
@@ -408,10 +449,6 @@ class ReflectionEngine:
         if overall > 0:
             return "store"
         return "skip"
-
-    # ------------------------------------------------------------------
-    # Legacy query / pattern access (backward compatible)
-    # ------------------------------------------------------------------
 
     def _evict_patterns(self, store: OrderedDict[str, dict[str, Any]]) -> None:
         now = time.time()

@@ -39,7 +39,10 @@ Desktop.ini
 # Agent runtime directories
 agent_notes/
 agent_workspace/
-agent_long_term.db
+agent_skills/
+agent_long_term.db*
+agent_vector.db*
+.langgraph_checkpoints/
 uploads/
 
 # Test / Coverage

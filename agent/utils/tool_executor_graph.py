@@ -5,32 +5,43 @@ LangGraph StateGraph + ToolNode approach for native tool execution.
 
 Architecture (LangGraph StateGraph + ToolNode):
 
-  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-  │  reason  │───→│ tool_node│───→│  observe │───→│   END    │
-  └────┬─────┘    └──────────┘    └────┬─────┘    └──────────┘
-       │ no tools                       │ more tools needed
-       ▼                                ▼
-  ┌──────────┐                   ┌──────────┐
-  │   END    │                   │  reason  │
-  └──────────┘                   └──────────┘
+  ┌──────────┐    ┌──────────┐    ┌──────────┐
+  │  reason  │───→│ tool_node│───→│  observe │───→ loop
+  └────┬─────┘    └──────────┘    └──────────┘
+       │ no tools
+       ▼
+  ┌──────────┐
+  │   END    │
+  └──────────┘
 
-Key LangGraph features leveraged:
-  1. ToolNode for native tool execution (no AgentExecutor)
-  2. StateGraph with TypedDict state for clean data flow
-  3. Conditional edges for reason/act/observe loop
-  4. SqliteSaver for execution state persistence
-  5. Send API ready for future parallel tool execution
-  6. Proper cancellation via configurable interrupts
+LangGraph design principles followed:
+  1. Entry point (execute) prepares initial state — nodes trust state
+  2. ToolNode manages `messages` (adds AIMessage/ToolMessage natively)
+  3. reason node is pure: read state → LLM call → return update
+  4. Config carries runtime context (llm, callbacks, cancel_event)
+  5. No side effects in nodes — LLM configured once at entry
+
+Key features:
+  • ToolNode for native tool execution (no AgentExecutor)
+  • StateGraph with TypedDict state for clean data flow
+  • Command-based routing for reason/act/observe loop
+  • Shared checkpointer for unified state persistence
+  • Subgraph composition support for embedding in parent graphs
+
+Note: _observe only emits progress events and clears state fields —
+it MUST NOT modify `messages` to avoid corrupting the conversation.
 """
 
 from __future__ import annotations
 
 import logging
+import operator
 import time
 import threading
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
@@ -46,8 +57,7 @@ _MAX_TOOL_ITERATIONS = 10
 class ToolExecutorState(TypedDict, total=False):
     input_text: str
     chat_history: list
-    messages: list
-    tools: list
+    messages: Annotated[list, operator.add]
     tool_calls: list
     tool_outputs: list
     iteration: int
@@ -61,20 +71,18 @@ class ToolExecutorState(TypedDict, total=False):
 class ToolExecutorGraph:
     """LangGraph-native tool execution engine.
 
-    Uses ToolNode for native tool execution with full checkpoint
-    and streaming support. Runtime params (cancel_event,
-    progress_callback, token_tracker) are passed via config
-    rather than constructor — enabling stateless, thread-safe
-    executor reuse across runs.
+    Supports both standalone invocation and subgraph composition.
+    When used as a subgraph, the parent graph's checkpointer is shared.
 
-    Usage:
+    Usage (standalone):
         executor = ToolExecutorGraph(llm=my_llm, tools=my_tools)
         result = executor.execute(
             input_text="分析这份数据",
-            chat_history=[],
             cancel_event=my_event,
-            progress_callback=my_cb,
         )
+
+    Usage (as subgraph):
+        main_graph.add_node("tool_exec", executor.compiled_graph)
     """
 
     def __init__(
@@ -99,9 +107,15 @@ class ToolExecutorGraph:
             getattr(t, "name", str(t)) for t in self._tools
         )
 
-        self._graph = self._build_graph(checkpointer)
+        self._checkpointer = checkpointer
+        self._graph = self._build_graph()
 
-    def _build_graph(self, checkpointer: Any | None = None) -> Any:
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose compiled graph for subgraph composition."""
+        return self._graph
+
+    def _build_graph(self) -> Any:
         graph = StateGraph(ToolExecutorState)
 
         graph.add_node("reason", self._node_reason)
@@ -111,9 +125,7 @@ class ToolExecutorGraph:
         graph.add_edge(START, "reason")
         graph.add_edge("execute_tools", "observe")
 
-        if checkpointer:
-            return graph.compile(checkpointer=checkpointer)
-        return graph.compile()
+        return graph.compile(checkpointer=self._checkpointer)
 
     def execute(
         self,
@@ -124,24 +136,8 @@ class ToolExecutorGraph:
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         token_tracker: Callable[[int], None] | None = None,
+        config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute the tool-calling loop via LangGraph.
-
-        Runtime params are passed via config["configurable"] so the
-        executor instance remains stateless and thread-safe.
-
-        Args:
-            input_text: The user query or task description.
-            chat_history: LangChain message list.
-            tools: Override default tools for this execution.
-            extra_tools: Additional tools to append.
-            cancel_event: Optional cancellation event.
-            progress_callback: Optional progress event callback.
-            token_tracker: Optional token usage tracker.
-
-        Returns:
-            dict with result, iterations, time, status, tool_calls.
-        """
         if cancel_event and cancel_event.is_set():
             return {
                 "status": "cancelled",
@@ -153,17 +149,17 @@ class ToolExecutorGraph:
                 "llm_calls": 0,
             }
 
-        active_tools = tools or self._tools
-        if extra_tools:
-            active_tools = list(active_tools) + list(extra_tools)
+        messages = self._prepare_initial_messages(input_text, chat_history)
 
-        messages = list(chat_history or [])
+        logger.info("[ToolExecGraph] execute: input_text=%s, chat_history_len=%d, prepared_msgs=%d",
+                     str(input_text)[:80], len(chat_history or []), len(messages))
+
+        llm_for_graph = self._prepare_llm_for_graph()
 
         initial_state: ToolExecutorState = {
             "input_text": input_text,
             "chat_history": chat_history or [],
             "messages": messages,
-            "tools": active_tools,
             "tool_calls": [],
             "tool_outputs": [],
             "iteration": 0,
@@ -174,20 +170,21 @@ class ToolExecutorGraph:
             "cancelled": False,
         }
 
-        config = {
-            "configurable": {
-                "thread_id": f"tool_exec_{id(self)}",
-                "cancel_event": cancel_event,
-                "progress_callback": progress_callback,
-                "token_tracker": token_tracker,
-                "llm": self._llm,
-            }
-        }
+        configurable = {}
+        if config and "configurable" in config:
+            configurable = dict(config["configurable"])
+        configurable["thread_id"] = f"tool_exec_{id(self)}_{id(input_text)}"
+        configurable.setdefault("cancel_event", cancel_event)
+        configurable.setdefault("progress_callback", progress_callback)
+        configurable.setdefault("token_tracker", token_tracker)
+        configurable.setdefault("llm", llm_for_graph)
+
+        run_config = {"configurable": configurable}
 
         start_time = time.time()
 
         try:
-            final = self._graph.invoke(initial_state, config=config)
+            final = self._graph.invoke(initial_state, config=run_config)
             elapsed = time.time() - start_time
 
             tool_call_count = final.get("iteration", 0)
@@ -222,12 +219,48 @@ class ToolExecutorGraph:
                 "llm_calls": 0,
             }
 
-    # ------------------------------------------------------------------
-    # Graph nodes (read runtime params from config, not self)
-    # ------------------------------------------------------------------
+    def _prepare_initial_messages(
+        self, input_text: str, chat_history: list | None
+    ) -> list:
+        """Entry-point message preparation (LangGraph best practice).
 
-    @staticmethod
-    def _node_reason(state: ToolExecutorState, config: Any) -> Command:
+        Ensures the initial state always contains a HumanMessage with
+        the current user input, appended AFTER any chat history so the
+        LLM sees the full conversation in chronological order.
+        Done ONCE at entry — nodes trust state.
+
+        LangGraph principle: state is the single source of truth.
+        The entry point is responsible for assembling the complete
+        message history; nodes never patch or reconstruct messages.
+        """
+        from langchain_core.messages import HumanMessage
+
+        raw = list(chat_history or [])
+        messages = ToolExecutorGraph._ensure_langchain_messages(raw)
+
+        if input_text:
+            messages.append(HumanMessage(content=input_text))
+
+        return messages
+
+    def _prepare_llm_for_graph(self) -> Any:
+        """Entry-point LLM configuration (LangGraph best practice).
+
+        Disables streaming for graph-internal LLM calls since the
+        graph itself orchestrates multi-turn flow. Done ONCE at entry
+        so nodes receive a clean, pre-configured LLM via config.
+        """
+        llm = self._llm
+        if llm is None:
+            return None
+        if not getattr(llm, "streaming", False):
+            return llm
+        try:
+            return llm.model_copy(update={"streaming": False})
+        except Exception:
+            return llm
+
+    def _node_reason(self, state: ToolExecutorState, config: RunnableConfig) -> Command:
         cfg = config.get("configurable", {}) if config else {}
         cancel_event = cfg.get("cancel_event")
         token_tracker = cfg.get("token_tracker")
@@ -260,12 +293,16 @@ class ToolExecutorGraph:
         messages = state.get("messages", [])
         input_text = state.get("input_text", "")
 
+        if not messages and input_text:
+            from langchain_core.messages import HumanMessage
+            messages = [HumanMessage(content=input_text)]
+
         if not messages:
-            messages = [{"role": "user", "content": input_text}]
+            return Command(goto=END, update={
+                "result": "无消息可处理",
+                "status": "failed",
+            })
 
-        messages = ToolExecutorGraph._ensure_langchain_messages(messages)
-
-        tools = state.get("tools", [])
         llm = cfg.get("llm")
         if llm is None:
             return Command(goto=END, update={
@@ -273,7 +310,22 @@ class ToolExecutorGraph:
                 "status": "failed",
             })
 
-        bound_llm = llm.bind_tools(tools)
+        msg_debug = []
+        for m in messages:
+            cls_name = type(m).__name__
+            mtype = getattr(m, "type", "?")
+            content = getattr(m, "content", "")
+            if isinstance(content, list):
+                content = str(content)[:100]
+            elif isinstance(content, str):
+                content = content[:100]
+            else:
+                content = str(content)[:100]
+            msg_debug.append(f"{cls_name}(type={mtype}, len={len(str(content))})")
+        logger.info("[ToolExecGraph] Reason node: iter=%d, msgs=[%s]",
+                     iteration, ", ".join(msg_debug))
+
+        bound_llm = llm.bind_tools(self._tools)
 
         try:
             response = bound_llm.invoke(messages)
@@ -293,7 +345,7 @@ class ToolExecutorGraph:
                 if isinstance(content, list):
                     content = "".join(str(c) for c in content)
                 return Command(goto=END, update={
-                    "messages": messages + [response],
+                    "messages": [response],
                     "result": str(content),
                     "status": "completed",
                     "iteration": iteration + 1,
@@ -311,7 +363,7 @@ class ToolExecutorGraph:
                 ]
 
             return Command(goto="execute_tools", update={
-                "messages": messages + [response],
+                "messages": [response],
                 "tool_calls": tool_calls,
                 "iteration": iteration + 1,
             })
@@ -325,58 +377,36 @@ class ToolExecutorGraph:
             })
 
     @staticmethod
-    def _node_observe(state: ToolExecutorState, config: Any) -> Command:
+    def _node_observe(state: ToolExecutorState, config: RunnableConfig) -> Command:
         cfg = config.get("configurable", {}) if config else {}
         progress_callback = cfg.get("progress_callback")
 
-        messages = state.get("messages", [])
         tool_calls = state.get("tool_calls", [])
-        tool_outputs = state.get("tool_outputs", [])
 
-        if not tool_calls:
-            return Command(goto=END, update={"status": "completed"})
+        if progress_callback and tool_calls:
+            messages = state.get("messages", [])
+            tool_results: dict[str, str] = {}
+            for msg in messages:
+                if hasattr(msg, "tool_call_id") and hasattr(msg, "content"):
+                    tool_results[msg.tool_call_id] = str(msg.content)
+                elif isinstance(msg, dict) and msg.get("role") == "tool":
+                    tool_results[msg.get("tool_call_id", "")] = str(msg.get("content", ""))
 
-        new_messages = list(messages)
-        for tc in tool_calls:
-            call_id = tc.get("id", "")
-            output = ""
-            for out in tool_outputs:
-                if isinstance(out, dict) and out.get("tool_call_id") == call_id:
-                    output = out.get("content", "")
-                    break
-            if not output:
-                output = "(no output)"
-
-            new_messages.append({
-                "tool_call_id": call_id,
-                "role": "tool",
-                "name": tc.get("name", ""),
-                "content": str(output),
-            })
-
-        if progress_callback:
             for tc in tool_calls:
+                call_id = tc.get("id", "")
+                output = tool_results.get(call_id, "")
                 progress_callback({
                     "type": "tool",
-                    "tool": tc.get("name", ""),
+                    "name": tc.get("name", ""),
                     "args": tc.get("args", {}),
-                    "output": next(
-                        (out.get("content", "") for out in tool_outputs
-                         if isinstance(out, dict) and out.get("tool_call_id") == tc.get("id", "")),
-                        "",
-                    ),
+                    "output": output,
                 })
 
         return Command(goto="reason", update={
-            "messages": new_messages,
             "tool_calls": [],
             "tool_outputs": [],
             "status": "running",
         })
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _ensure_langchain_messages(messages: list) -> list:
@@ -434,11 +464,7 @@ def create_tool_executor(
     scene: str | None = None,
     checkpointer: Any | None = None,
 ) -> ToolExecutorGraph:
-    """Factory function to create a stateless ToolExecutorGraph.
-
-    Runtime params (cancel_event, progress_callback, token_tracker)
-    are passed to execute() at call time, not to the factory.
-    """
+    """Factory function to create a stateless ToolExecutorGraph."""
     if scene:
         tools = list_scene_tools(scene)
     else:

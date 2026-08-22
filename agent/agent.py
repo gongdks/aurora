@@ -33,7 +33,7 @@ class AgentSession:
     """Plan-and-Execute agent session powered by pure LangGraph.
 
     One instance = one agent runtime with:
-        - LLM (remote API or local Ollama)
+        - LLM (API-based chat model)
         - Short-term conversation memory
         - Long-term knowledge persistence
         - LangGraph orchestrator with planning, execution, verification

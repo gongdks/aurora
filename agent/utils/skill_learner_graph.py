@@ -12,7 +12,6 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agent.memory.memory_manager import MemoryManager
 from .skill_store import SkillDefinition, SkillStore, _DEFAULT_SKILLS_DIR
 import os
 
@@ -36,6 +35,8 @@ class SkillLearnerState(TypedDict, total=False):
     should_store: bool
     stored_skill: dict[str, Any] | None
     error: str | None
+    existing_skill_names: list[str]
+    derived_skill_name: str
 
 
 class SkillLearnerGraph:
@@ -58,11 +59,14 @@ class SkillLearnerGraph:
     def __init__(
         self,
         store: SkillStore | None = None,
-        memory_manager: Any | None = None,
     ):
         self._store = store or SkillStore()
-        self._memory_manager = memory_manager or MemoryManager()
         self._graph = self._build_graph()
+
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose compiled graph for subgraph composition."""
+        return self._graph
 
     def _build_graph(self):
         graph = StateGraph(SkillLearnerState)
@@ -98,6 +102,8 @@ class SkillLearnerGraph:
         reflection_score: float = 0.0,
     ) -> SkillDefinition | None:
         try:
+            existing_names = [sk.name for sk in self._store.list_all()]
+
             initial_state: SkillLearnerState = {
                 "user_input": user_input,
                 "plan": plan,
@@ -105,10 +111,15 @@ class SkillLearnerGraph:
                 "tool_calls": tool_calls,
                 "success": success,
                 "reflection_score": reflection_score,
+                "existing_skill_names": existing_names,
             }
             result = self._graph.invoke(initial_state)
+
             if result.get("stored_skill"):
-                return SkillDefinition(**result["stored_skill"])
+                skill_def = SkillDefinition(**result["stored_skill"])
+                self._store.save(skill_def)
+                logger.info(f"Saved skill '{skill_def.name}' with confidence {skill_def.confidence}")
+                return skill_def
             return None
         except Exception as e:
             logger.error(f"Skill learning graph failed: {e}")
@@ -196,14 +207,6 @@ class SkillLearnerGraph:
         if not state.get("should_store") or not state.get("tool_sequence"):
             return {"stored_skill": None}
 
-        tool_schemas: list[dict[str, Any]] = []
-        for step in state.get("tool_sequence", []):
-            tool_name = step["tool"]
-            if hasattr(self._memory_manager, "get_tool_schema"):
-                schema = self._memory_manager.get_tool_schema(tool_name)
-                if schema:
-                    tool_schemas.append({"tool": tool_name, "schema": schema})
-
         skill_name = self._derive_skill_name(state)
 
         skill = SkillDefinition(
@@ -211,17 +214,16 @@ class SkillLearnerGraph:
             description=f"Skill: {state.get('user_input', '')[:80]}",
             trigger_patterns=state.get("trigger_patterns", []),
             tool_sequence=state.get("tool_sequence", []),
-            tool_schemas=tool_schemas,
             confidence=state.get("confidence", 0.0),
             usage_count=1,
             success_count=1 if state.get("success") else 0,
             failure_count=0 if state.get("success") else 1,
         )
 
-        self._store.save(skill)
-        logger.info(f"Stored skill '{skill_name}' with confidence {state.get('confidence', 0.0)}")
-
-        return {"stored_skill": skill.to_dict()}
+        return {
+            "stored_skill": skill.to_dict(),
+            "derived_skill_name": skill_name,
+        }
 
     def _node_skip(self, state: SkillLearnerState) -> dict[str, Any]:
         logger.debug(f"Skipping skill storage: {state.get('error') or 'low confidence or no tools'}")
@@ -247,11 +249,11 @@ class SkillLearnerGraph:
         else:
             base = "skill"
         base = base[:32]
-        existing = self._store.list_all()
+        existing_names = state.get("existing_skill_names", [])
         used_nums: set[int] = set()
-        for sk in existing:
-            if sk.name.startswith(base):
-                suffix = sk.name[len(base):]
+        for name in existing_names:
+            if name.startswith(base):
+                suffix = name[len(base):]
                 if suffix.isdigit():
                     used_nums.add(int(suffix))
         n = 1

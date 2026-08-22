@@ -37,7 +37,7 @@ class TestWithTimeoutRetry:
                 raise ValueError("temporary error")
             return "success"
 
-        fn = with_timeout_retry(_fn, max_retries=2)  # 1 initial + 2 retries = 3 attempts
+        fn = with_timeout_retry(_fn, max_retries=2, retry_delay=0.05)
         result = fn()
         assert result == "success"
         assert call_count == 3
@@ -50,7 +50,7 @@ class TestWithTimeoutRetry:
             call_count += 1
             raise ValueError("persistent error")
 
-        fn = with_timeout_retry(_fn)  # default: max_retries=1 → 2 attempts
+        fn = with_timeout_retry(_fn, retry_delay=0.05)
         with pytest.raises(ValueError):
             fn()
         assert call_count == 2
@@ -61,7 +61,7 @@ class TestWithTimeoutRetry:
         def _fn() -> str:
             nonlocal call_count
             call_count += 1
-            raise KeyboardInterrupt()  # not in default retryable tuple
+            raise KeyboardInterrupt()
 
         fn = with_timeout_retry(_fn)
         with pytest.raises(KeyboardInterrupt):
@@ -78,7 +78,7 @@ class TestWithTimeoutRetry:
                 raise KeyError("missing key")
             return "found"
 
-        fn = with_timeout_retry(_fn, retryable_exceptions=(KeyError,))
+        fn = with_timeout_retry(_fn, retryable_exceptions=(KeyError,), retry_delay=0.05)
         result = fn()
         assert result == "found"
         assert call_count == 2
@@ -91,19 +91,17 @@ class TestWithTimeoutRetry:
             call_count += 1
             raise ValueError("fail")
 
-        fn = with_timeout_retry(_fn, max_retries=3)
+        fn = with_timeout_retry(_fn, max_retries=3, retry_delay=0.05)
         with pytest.raises(ValueError):
             fn()
-        assert call_count == 4  # 1 initial + 3 retries
+        assert call_count == 4
 
     def test_timeout_func(self):
-        """Test that timeout actually raises after the specified time."""
-
         def _slow_fn() -> str:
-            time.sleep(2.0)
+            time.sleep(0.5)
             return "too late"
 
-        fn = with_timeout_retry(_slow_fn, timeout=0.1, max_retries=0)
+        fn = with_timeout_retry(_slow_fn, timeout=0.05, max_retries=0)
         with pytest.raises(TimeoutError):
             fn()
 

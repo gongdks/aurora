@@ -242,7 +242,7 @@ class MultiAgentGraph:
         self._roles = roles or create_default_roles()
         self._llm = llm
         self._coordinator_llm = coordinator_llm or llm
-        self.graph = self._build_graph()
+        self._compiled_graph = self._build_graph()
         logger.info(
             "[MultiAgent] Graph ready with %d roles: %s",
             len(self._roles),
@@ -532,6 +532,11 @@ class MultiAgentGraph:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose compiled graph for subgraph composition."""
+        return self._compiled_graph
+
     def invoke(
         self,
         task: str,
@@ -551,7 +556,7 @@ class MultiAgentGraph:
         initial = _make_initial_state(task, role_plan=role_plan, context=context)
 
         try:
-            result = self.graph.invoke(initial)
+            result = self._compiled_graph.invoke(initial)
             return {
                 "task": task,
                 "synthesis": result.get("synthesis", ""),
